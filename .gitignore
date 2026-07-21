@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project outputs
+outputs/
+logs/
+*.pt
+*.pth
+*.ckpt
+
+# HuggingFace / caches
+.cache/
+hf_home/
+
+# CUDA / Triton JIT
+.torch_extensions/
+triton_cache/

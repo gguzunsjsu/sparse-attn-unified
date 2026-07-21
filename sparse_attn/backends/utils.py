@@ -1,0 +1,80 @@
+"""Sparse attention utilities shared by SOCKET and SAAP backends."""
+
+from __future__ import annotations
+
+import math
+
+import torch
+import torch.nn.functional as F
+
+
+def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply rotary position embedding. x: [B, H, T, D]."""
+    x1, x2 = x[..., ::2], x[..., 1::2]
+    rotated = torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    return rotated.flatten(-2)
+
+
+def build_rope_cache(
+    seq_len: int,
+    head_dim: int,
+    device: torch.device,
+    dtype: torch.dtype,
+    theta: float = 500000.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute cos/sin for RoPE."""
+    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, device=device).float() / head_dim))
+    t = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
+    freqs = torch.outer(t, inv_freq)
+    cos = freqs.cos().to(dtype).unsqueeze(0).unsqueeze(0)
+    sin = freqs.sin().to(dtype).unsqueeze(0).unsqueeze(0)
+    return cos, sin
+
+
+def sparse_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    indices: torch.LongTensor,
+) -> torch.Tensor:
+    """
+    Gather selected keys/values and compute causal softmax attention.
+
+    q: [B, H, Q, D]
+    k, v: [B, H, T, D]
+    indices: [B, H, Q, K_sel] key positions per query
+    """
+    b, h, q_len, d = q.shape
+    k_sel = indices.shape[-1]
+
+    idx = indices.unsqueeze(-1).expand(b, h, q_len, k_sel, d)
+    k_g = torch.gather(k.unsqueeze(2).expand(b, h, q_len, k.size(2), d), 3, idx)
+    v_g = torch.gather(v.unsqueeze(2).expand(b, h, q_len, v.size(2), d), 3, idx)
+
+    scale = 1.0 / math.sqrt(d)
+    scores = (q.unsqueeze(3) * k_g).sum(-1) * scale
+
+    key_pos = indices
+    query_pos = torch.arange(q_len, device=q.device).view(1, 1, q_len, 1)
+    causal = key_pos > query_pos
+    scores = scores.masked_fill(causal, float("-inf"))
+
+    probs = F.softmax(scores, dim=-1)
+    out = (probs.unsqueeze(-1) * v_g).sum(-2)
+    return out
+
+
+def always_keep_indices(
+    seq_len: int,
+    sink_size: int,
+    window_size: int,
+    device: torch.device,
+) -> torch.LongTensor:
+    """Sink + local window token indices."""
+    sink = torch.arange(min(sink_size, seq_len), device=device)
+    if window_size > 0 and seq_len > sink_size:
+        window = torch.arange(max(0, seq_len - window_size), seq_len, device=device)
+        keep = torch.unique(torch.cat([sink, window]))
+    else:
+        keep = sink
+    return keep

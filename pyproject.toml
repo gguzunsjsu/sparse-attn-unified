@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sparse-attn-unified"
+version = "0.1.0"
+description = "SSA training framework with pluggable SOCKET and Soft-SAAP sparse backends"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "torch>=2.2.0",
+    "transformers>=4.54.0",
+    "datasets>=3.0.0",
+    "accelerate>=1.0.0",
+    "einops>=0.8.0",
+    "pyyaml>=6.0",
+    "tqdm>=4.66.0",
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-cov>=5.0"]
+flash = ["flash-attn>=2.7.0"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sparse_attn*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

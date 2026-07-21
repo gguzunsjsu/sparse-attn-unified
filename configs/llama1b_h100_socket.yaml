@@ -1,0 +1,39 @@
+# Llama-1B + SSA + SOCKET — tuned for single SJSU H100 (80 GB)
+# Effective batch = per_device_batch * grad_accum = 2 * 8 = 16
+
+seq_length: 4096
+per_device_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 3.0e-4
+warmup_steps: 500
+max_steps: 10000
+bf16: true
+gradient_checkpointing: true
+
+base_model: meta-llama/Llama-3.2-1B
+output_dir: ./outputs/llama1b-ssa-socket
+
+ssa:
+  p_sparse: 0.5
+  align_weight: 1.0
+  align_metric: mse
+  sparse_backend: socket
+  align_stopgrad_sa: true
+  checkpoint_fa: true
+
+socket:
+  bucket_k: 8
+  bucket_l: 60
+  train_l: 16          # reduced L during training (full 60 at inference)
+  tau: 0.4
+  heavy_const: 0.10    # ~10% heavy tokens + sink/window
+  sink_size: 32
+  window_size: 32
+
+saap:
+  num_clusters: 64
+  top_m_clusters: 2
+  refresh_interval: 500
+  router_hidden: 512
+  gumbel_tau: 1.0
+  use_soft_routing: true
