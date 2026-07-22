@@ -50,6 +50,11 @@ else
     exit 1
 fi
 
+if ! python -c "import torch" 2>/dev/null; then
+    echo "ERROR: torch not in env. Run on login node: bash scripts/setup_hpc.sh"
+    exit 1
+fi
+
 mkdir -p logs outputs
 
 python scripts/train_llama1b_ssa.py \

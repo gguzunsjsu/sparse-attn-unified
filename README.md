@@ -59,6 +59,7 @@ bash scripts/setup_hpc_legacy.sh
 | `Installer requires GLIBC >=2.28, but system has 2.17` | Latest Miniconda too new for login node OS | Use `bash scripts/setup_hpc.sh` (micromamba) or `setup_hpc_legacy.sh` |
 | `PermissionError: ... /opt/ohpc/.../site-packages/...` | Using system `pip` from `module load python3` | Never install with system pip; activate `ssa-h100` first, use `python -m pip` |
 | `Defaulting to user installation because normal site-packages is not writeable` | Same as above — wrong Python | Run `which python` — must point to `~/micromamba/envs/ssa-h100/` or `~/miniconda3/envs/ssa-h100/` |
+| `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
 | `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | On GPU node: `module load cuda` before running Python |
 | `module avail` shows no cuda 12.x | Older CUDA module | Run `module avail cuda`; if only 11.x is available, reinstall torch for cu118: `pip install torch --index-url https://download.pytorch.org/whl/cu118` |
 
@@ -100,15 +101,39 @@ which huggingface-cli
 
 ### 4. Smoke test (interactive H100)
 
+Each new GPU shell starts **without** your conda env. You must activate it every time.
+
+**Recommended — use the wrapper script:**
+
+```bash
+srun -p gpu --gres=gpu:1 --cpus-per-task=8 --mem=128G --time=01:00:00 --pty /bin/bash
+cd /fs/sfs/scratch/rnd-guzun/sparse-attn-unified   # or your clone path
+bash scripts/run_smoke_test.sh
+```
+
+**Manual steps:**
+
 ```bash
 srun -p gpu --gres=gpu:1 --cpus-per-task=8 --mem=128G --time=01:00:00 --pty /bin/bash
 
-module load cuda
-micromamba activate ssa-h100
 cd ~/sparse-attn-unified
+source scripts/activate_env.sh    # required — loads micromamba + ssa-h100
+module load cuda
 
 python scripts/train_llama1b_ssa.py --smoke-test --from-scratch
 pytest tests/ -v
+```
+
+**Without activate** (direct path — always works):
+
+```bash
+~/micromamba/envs/ssa-h100/bin/python scripts/train_llama1b_ssa.py --smoke-test --from-scratch
+```
+
+If `activate_env.sh` reports torch missing, re-run setup on the **login node**:
+
+```bash
+bash scripts/setup_hpc.sh
 ```
 
 ### 5. Submit training job
@@ -157,6 +182,8 @@ sparse_attn/
 scripts/
 ├── setup_hpc.sh          # Recommended SJSU HPC setup (micromamba)
 ├── setup_hpc_legacy.sh   # Fallback for GLIBC 2.17
+├── activate_env.sh       # Source on every new shell (login or GPU)
+├── run_smoke_test.sh     # GPU smoke test wrapper
 ├── train_llama1b_ssa.py
 └── slurm/train_llama1b_h100.slurm
 ```

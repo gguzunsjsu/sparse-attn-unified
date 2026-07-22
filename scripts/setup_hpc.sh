@@ -18,6 +18,7 @@ MAMBA_ROOT="${MAMBA_ROOT:-$HOME/micromamba}"
 echo "=== sparse-attn-unified HPC setup ==="
 echo "Project:  $PROJECT_ROOT"
 echo "Env:      $ENV_NAME"
+echo "Mamba:    $MAMBA_ROOT"
 echo "GLIBC:    $(ldd --version 2>/dev/null | head -1 || echo 'unknown')"
 
 # Never use the module system Python/pip for installs.
@@ -49,12 +50,25 @@ fi
 
 micromamba activate "$ENV_NAME"
 
-# PyTorch + CUDA — use conda-forge/pytorch channel (no system pip needed).
-# Adjust cuda version after: module avail cuda  (on a GPU node)
+install_pytorch() {
+    echo "Installing PyTorch..."
+    if micromamba install -y -c pytorch -c nvidia pytorch pytorch-cuda=12.1; then
+        return 0
+    fi
+    echo "Conda PyTorch install failed — trying pip wheel (cu121)..."
+    python -m pip install torch --index-url https://download.pytorch.org/whl/cu121
+}
+
 if ! python -c "import torch" 2>/dev/null; then
-    echo "Installing PyTorch (CUDA 12.1 build)..."
-    micromamba install -y -c pytorch -c nvidia \
-        pytorch pytorch-cuda=12.1
+    install_pytorch
+fi
+
+if ! python -c "import torch" 2>/dev/null; then
+    echo ""
+    echo "FATAL: torch still not importable after install."
+    echo "Try manually inside the env:"
+    echo "  python -m pip install torch --index-url https://download.pytorch.org/whl/cu121"
+    exit 1
 fi
 
 echo "Installing project dependencies..."
@@ -62,15 +76,19 @@ python -m pip install --upgrade pip
 python -m pip install -e "$PROJECT_ROOT"
 python -m pip install transformers datasets accelerate einops pyyaml tqdm pytest huggingface_hub
 
+PYTHON_BIN="$MAMBA_ROOT/envs/$ENV_NAME/bin/python"
 echo ""
 echo "=== Setup complete ==="
-echo "Verify with:"
-echo "  micromamba activate $ENV_NAME"
-echo "  python -c \"import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())\""
+echo "Python:  $PYTHON_BIN"
+"$PYTHON_BIN" -c "import torch; print('Torch:', torch.__version__)"
 echo ""
-echo "On GPU node:"
+echo "On GPU node (new shell — must activate env every time):"
+echo "  source $PROJECT_ROOT/scripts/activate_env.sh"
 echo "  module load cuda"
-echo "  python $PROJECT_ROOT/scripts/train_llama1b_ssa.py --smoke-test --from-scratch"
+echo "  bash $PROJECT_ROOT/scripts/run_smoke_test.sh"
+echo ""
+echo "Or call python directly (no activate needed):"
+echo "  $PYTHON_BIN $PROJECT_ROOT/scripts/train_llama1b_ssa.py --smoke-test --from-scratch"
 echo ""
 echo "Add to ~/.bashrc (once):"
 echo "  eval \"\$($MAMBA_ROOT/bin/micromamba shell hook -s bash)\""
