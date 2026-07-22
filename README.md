@@ -59,6 +59,7 @@ bash scripts/setup_hpc_legacy.sh
 | `Installer requires GLIBC >=2.28, but system has 2.17` | Latest Miniconda too new for login node OS | Use `bash scripts/setup_hpc.sh` (micromamba) or `setup_hpc_legacy.sh` |
 | `PermissionError: ... /opt/ohpc/.../site-packages/...` | Using system `pip` from `module load python3` | Never install with system pip; activate `ssa-h100` first, use `python -m pip` |
 | `Defaulting to user installation because normal site-packages is not writeable` | Same as above — wrong Python | Run `which python` — must point to `~/micromamba/envs/ssa-h100/` or `~/miniconda3/envs/ssa-h100/` |
+| `ERROR: torch not installed in env 'ssa-h100'` | Env created but PyTorch install failed/skipped | `bash scripts/install_torch.sh` |
 | `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
 | `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | On GPU node: `module load cuda` before running Python |
 | `module avail` shows no cuda 12.x | Older CUDA module | Run `module avail cuda`; if only 11.x is available, reinstall torch for cu118: `pip install torch --index-url https://download.pytorch.org/whl/cu118` |
@@ -130,7 +131,14 @@ pytest tests/ -v
 ~/micromamba/envs/ssa-h100/bin/python scripts/train_llama1b_ssa.py --smoke-test --from-scratch
 ```
 
-If `activate_env.sh` reports torch missing, re-run setup on the **login node**:
+If `activate_env.sh` reports torch missing, install it:
+
+```bash
+bash scripts/install_torch.sh
+bash scripts/run_smoke_test.sh
+```
+
+Or re-run full setup on the **login node**:
 
 ```bash
 bash scripts/setup_hpc.sh
