@@ -34,6 +34,6 @@ python -m pip install torch --index-url https://download.pytorch.org/whl/cu121
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python -m pip install -e "$PROJECT_ROOT"
-python -m pip install transformers datasets accelerate einops pyyaml tqdm pytest
+python -m pip install transformers datasets accelerate einops pyyaml tqdm pytest huggingface_hub
 
 echo "Done. Run: conda activate $ENV_NAME"

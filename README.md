@@ -75,12 +75,27 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 
 ### 3. HuggingFace access
 
-Llama 3.2 1B is gated:
+Llama 3.2 1B is gated. **Activate your env first** — `huggingface-cli` is not available on the system Python.
 
 ```bash
-micromamba activate ssa-h100
+micromamba activate ssa-h100   # or: conda activate ssa-h100
+
+# Install CLI if missing
+python -m pip install huggingface_hub
+
+# Login (either form works)
 huggingface-cli login
+# OR
+python -m huggingface_hub.cli.huggingface_cli login
+
 export HF_HOME=$HOME/.cache/huggingface
+```
+
+If you still get `command not found`, check you're in the right env:
+
+```bash
+which python    # should be ~/micromamba/envs/ssa-h100/bin/python
+which huggingface-cli
 ```
 
 ### 4. Smoke test (interactive H100)

@@ -60,7 +60,7 @@ fi
 echo "Installing project dependencies..."
 python -m pip install --upgrade pip
 python -m pip install -e "$PROJECT_ROOT"
-python -m pip install transformers datasets accelerate einops pyyaml tqdm pytest
+python -m pip install transformers datasets accelerate einops pyyaml tqdm pytest huggingface_hub
 
 echo ""
 echo "=== Setup complete ==="
