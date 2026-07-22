@@ -38,22 +38,9 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=8
 
-# Activate env — micromamba (preferred) or miniconda fallback
-if [[ -x "$HOME/micromamba/bin/micromamba" ]]; then
-    eval "$("$HOME/micromamba/bin/micromamba" shell hook -s bash)"
-    micromamba activate ssa-h100
-elif [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
-    source "$HOME/miniconda3/etc/profile.d/conda.sh"
-    conda activate ssa-h100
-else
-    echo "ERROR: No env found. Run: bash scripts/setup_hpc.sh"
-    exit 1
-fi
-
-if ! python -c "import torch" 2>/dev/null; then
-    echo "ERROR: torch not in env. Run on login node: bash scripts/setup_hpc.sh"
-    exit 1
-fi
+# Activate env via shared helpers (handles empty $HOME on compute nodes)
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/scripts/activate_env.sh"
 
 mkdir -p logs outputs
 

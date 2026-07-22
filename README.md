@@ -59,6 +59,7 @@ bash scripts/setup_hpc_legacy.sh
 | `Installer requires GLIBC >=2.28, but system has 2.17` | Latest Miniconda too new for login node OS | Use `bash scripts/setup_hpc.sh` (micromamba) or `setup_hpc_legacy.sh` |
 | `PermissionError: ... /opt/ohpc/.../site-packages/...` | Using system `pip` from `module load python3` | Never install with system pip; activate `ssa-h100` first, use `python -m pip` |
 | `Defaulting to user installation because normal site-packages is not writeable` | Same as above — wrong Python | Run `which python` — must point to `~/micromamba/envs/ssa-h100/` or `~/miniconda3/envs/ssa-h100/` |
+| `ERROR: env 'ssa-h100' not found` | Setup never completed, or `$HOME` wrong on GPU node | Login node: `bash scripts/setup_hpc.sh`; then `bash scripts/doctor_hpc.sh` |
 | `ERROR: torch not installed in env 'ssa-h100'` | Env created but PyTorch install failed/skipped | `bash scripts/install_torch.sh` |
 | `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
 | `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | On GPU node: `module load cuda` before running Python |
@@ -101,6 +102,12 @@ which huggingface-cli
 ```
 
 ### 4. Smoke test (interactive H100)
+
+**First, diagnose your env (works on login or GPU node):**
+
+```bash
+bash scripts/doctor_hpc.sh
+```
 
 Each new GPU shell starts **without** your conda env. You must activate it every time.
 
@@ -191,6 +198,8 @@ scripts/
 ├── setup_hpc.sh          # Recommended SJSU HPC setup (micromamba)
 ├── setup_hpc_legacy.sh   # Fallback for GLIBC 2.17
 ├── activate_env.sh       # Source on every new shell (login or GPU)
+├── doctor_hpc.sh         # Diagnose env / torch / paths
+├── install_torch.sh      # Install PyTorch if missing
 ├── run_smoke_test.sh     # GPU smoke test wrapper
 ├── train_llama1b_ssa.py
 └── slurm/train_llama1b_h100.slurm

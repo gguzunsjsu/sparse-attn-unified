@@ -1,27 +1,24 @@
 #!/usr/bin/env bash
 # Setup script for SJSU CoE HPC (older GLIBC 2.17 login nodes).
 #
-# Fixes two common failures:
-#   1. Miniconda3-latest requires GLIBC >= 2.28
-#   2. module-load system pip hits PermissionError on /opt/ohpc/...
-#
 # Usage (on login node):
 #   cd ~/sparse-attn-unified
 #   bash scripts/setup_hpc.sh
 
 set -euo pipefail
 
-ENV_NAME="${ENV_NAME:-ssa-h100}"
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MAMBA_ROOT="${MAMBA_ROOT:-$HOME/micromamba}"
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$_SCRIPT_DIR/.." && pwd)"
+# shellcheck source=hpc_common.sh
+source "$_SCRIPT_DIR/hpc_common.sh"
 
 echo "=== sparse-attn-unified HPC setup ==="
 echo "Project:  $PROJECT_ROOT"
 echo "Env:      $ENV_NAME"
+echo "HPC_HOME: $HPC_HOME"
 echo "Mamba:    $MAMBA_ROOT"
 echo "GLIBC:    $(ldd --version 2>/dev/null | head -1 || echo 'unknown')"
 
-# Never use the module system Python/pip for installs.
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
 
@@ -39,16 +36,24 @@ install_micromamba() {
     "$MAMBA_ROOT/bin/micromamba" shell init -s bash -p "$MAMBA_ROOT" >/dev/null
 }
 
-eval "$("$MAMBA_ROOT/bin/micromamba" shell hook -s bash)"
-install_micromamba
+if [[ ! -x "$MAMBA_ROOT/bin/micromamba" ]]; then
+    install_micromamba
+fi
 
-if ! micromamba env list | grep -q "^${ENV_NAME} "; then
+eval "$("$MAMBA_ROOT/bin/micromamba" shell hook -s bash)"
+
+if ! env_exists "$ENV_NAME"; then
     echo "Creating conda env: $ENV_NAME (python 3.10)..."
     micromamba create -n "$ENV_NAME" -y -c conda-forge \
         python=3.10 pip setuptools wheel
 fi
 
-micromamba activate "$ENV_NAME"
+if ! env_exists "$ENV_NAME"; then
+    echo "FATAL: env '$ENV_NAME' was not created at ${MAMBA_ROOT}/envs/${ENV_NAME}"
+    exit 1
+fi
+
+activate_env "$ENV_NAME"
 
 install_pytorch() {
     echo "Installing PyTorch..."
@@ -66,8 +71,7 @@ fi
 if ! python -c "import torch" 2>/dev/null; then
     echo ""
     echo "FATAL: torch still not importable after install."
-    echo "Try manually inside the env:"
-    echo "  python -m pip install torch --index-url https://download.pytorch.org/whl/cu121"
+    echo "Try: bash scripts/install_torch.sh"
     exit 1
 fi
 
@@ -76,19 +80,17 @@ python -m pip install --upgrade pip
 python -m pip install -e "$PROJECT_ROOT"
 python -m pip install transformers datasets accelerate einops pyyaml tqdm pytest huggingface_hub
 
-PYTHON_BIN="$MAMBA_ROOT/envs/$ENV_NAME/bin/python"
+PYTHON_BIN="$(find_env_python "$ENV_NAME")"
 echo ""
 echo "=== Setup complete ==="
 echo "Python:  $PYTHON_BIN"
 "$PYTHON_BIN" -c "import torch; print('Torch:', torch.__version__)"
 echo ""
-echo "On GPU node (new shell — must activate env every time):"
-echo "  source $PROJECT_ROOT/scripts/activate_env.sh"
-echo "  module load cuda"
-echo "  bash $PROJECT_ROOT/scripts/run_smoke_test.sh"
+echo "Verify anywhere (login or GPU node):"
+echo "  bash $PROJECT_ROOT/scripts/doctor_hpc.sh"
 echo ""
-echo "Or call python directly (no activate needed):"
-echo "  $PYTHON_BIN $PROJECT_ROOT/scripts/train_llama1b_ssa.py --smoke-test --from-scratch"
+echo "Smoke test on GPU node:"
+echo "  bash $PROJECT_ROOT/scripts/run_smoke_test.sh"
 echo ""
 echo "Add to ~/.bashrc (once):"
 echo "  eval \"\$($MAMBA_ROOT/bin/micromamba shell hook -s bash)\""
