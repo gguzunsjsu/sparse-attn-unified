@@ -37,12 +37,14 @@ cd ~/sparse-attn-unified
 bash scripts/setup_hpc.sh
 ```
 
-This installs micromamba in `~/micromamba`, creates env `ssa-h100`, and installs PyTorch + project deps inside the env.
+This creates env `ssa-h100` and installs PyTorch + project deps. On SJSU HPC the env may live under `~/.local/share/mamba/envs/` or `~/miniforge3/envs/` rather than `~/micromamba/` — the scripts auto-detect this.
 
-Add to `~/.bashrc` (once, after setup):
+Add to `~/.bashrc` (once, after setup — use whichever path exists on your account):
 
 ```bash
-eval "$($HOME/micromamba/bin/micromamba shell hook -s bash)"
+eval "$($HOME/miniforge3/bin/micromamba shell hook -s bash)" 2>/dev/null || true
+eval "$($HOME/.local/share/mamba/bin/micromamba shell hook -s bash)" 2>/dev/null || true
+eval "$($HOME/micromamba/bin/micromamba shell hook -s bash)" 2>/dev/null || true
 ```
 
 **Alternative — legacy Miniconda 4.12.0:**
