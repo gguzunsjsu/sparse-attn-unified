@@ -28,17 +28,27 @@ PROJECT_ROOT="${PROJECT_ROOT:-$HOME/sparse-attn-unified}"
 cd "$PROJECT_ROOT"
 
 module purge
-module load python3
 module load cuda
 
-# Conda env (create once on login node — see README)
-source "$HOME/miniconda3/etc/profile.d/conda.sh"
-conda activate ssa-h100
-
+# Do NOT module load python3 — use micromamba/conda env only.
+unset PYTHONPATH
+export PYTHONNOUSERSITE=1
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=8
+
+# Activate env — micromamba (preferred) or miniconda fallback
+if [[ -x "$HOME/micromamba/bin/micromamba" ]]; then
+    eval "$("$HOME/micromamba/bin/micromamba" shell hook -s bash)"
+    micromamba activate ssa-h100
+elif [[ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]]; then
+    source "$HOME/miniconda3/etc/profile.d/conda.sh"
+    conda activate ssa-h100
+else
+    echo "ERROR: No env found. Run: bash scripts/setup_hpc.sh"
+    exit 1
+fi
 
 mkdir -p logs outputs
 

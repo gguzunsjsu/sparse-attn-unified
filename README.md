@@ -22,33 +22,63 @@ During training, both streams run every layer; the primary output is randomly FA
 
 ```bash
 ssh YOUR_ID@coe-hpc.sjsu.edu
-git clone <your-repo-url> ~/sparse-attn-unified
+git clone https://github.com/gguzunsjsu/sparse-attn-unified.git ~/sparse-attn-unified
 cd ~/sparse-attn-unified
 ```
 
-### 2. Create conda environment (once)
+### 2. Create environment (once)
+
+SJSU login nodes use **GLIBC 2.17**. Do **not** use `Miniconda3-latest` (requires GLIBC ≥ 2.28) and do **not** run `pip install` with `module load python3` (system pip is read-only and will fail with `PermissionError`).
+
+**Recommended — micromamba (works on GLIBC 2.17):**
 
 ```bash
-module load python3 cuda
-wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
-bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda3
-source $HOME/miniconda3/etc/profile.d/conda.sh
-
-conda create -n ssa-h100 python=3.10 -y
-conda activate ssa-h100
-
-pip install torch --index-url https://download.pytorch.org/whl/cu124
-pip install -e .
-pip install transformers datasets accelerate einops pyyaml tqdm pytest
+cd ~/sparse-attn-unified
+bash scripts/setup_hpc.sh
 ```
 
-> **Note:** SJSU HPC uses `module load cuda` — check available versions with `module avail cuda`. Match your PyTorch CUDA wheel accordingly.
+This installs micromamba in `~/micromamba`, creates env `ssa-h100`, and installs PyTorch + project deps inside the env.
+
+Add to `~/.bashrc` (once, after setup):
+
+```bash
+eval "$($HOME/micromamba/bin/micromamba shell hook -s bash)"
+```
+
+**Alternative — legacy Miniconda 4.12.0:**
+
+```bash
+bash scripts/setup_hpc_legacy.sh
+```
+
+<details>
+<summary>Troubleshooting HPC setup</summary>
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Installer requires GLIBC >=2.28, but system has 2.17` | Latest Miniconda too new for login node OS | Use `bash scripts/setup_hpc.sh` (micromamba) or `setup_hpc_legacy.sh` |
+| `PermissionError: ... /opt/ohpc/.../site-packages/...` | Using system `pip` from `module load python3` | Never install with system pip; activate `ssa-h100` first, use `python -m pip` |
+| `Defaulting to user installation because normal site-packages is not writeable` | Same as above — wrong Python | Run `which python` — must point to `~/micromamba/envs/ssa-h100/` or `~/miniconda3/envs/ssa-h100/` |
+| `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | On GPU node: `module load cuda` before running Python |
+| `module avail` shows no cuda 12.x | Older CUDA module | Run `module avail cuda`; if only 11.x is available, reinstall torch for cu118: `pip install torch --index-url https://download.pytorch.org/whl/cu118` |
+
+Verify your env:
+
+```bash
+micromamba activate ssa-h100   # or: conda activate ssa-h100
+which python                   # should NOT be /opt/ohpc/...
+which pip
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+</details>
 
 ### 3. HuggingFace access
 
 Llama 3.2 1B is gated:
 
 ```bash
+micromamba activate ssa-h100
 huggingface-cli login
 export HF_HOME=$HOME/.cache/huggingface
 ```
@@ -57,8 +87,9 @@ export HF_HOME=$HOME/.cache/huggingface
 
 ```bash
 srun -p gpu --gres=gpu:1 --cpus-per-task=8 --mem=128G --time=01:00:00 --pty /bin/bash
-module load python3 cuda
-conda activate ssa-h100
+
+module load cuda
+micromamba activate ssa-h100
 cd ~/sparse-attn-unified
 
 python scripts/train_llama1b_ssa.py --smoke-test --from-scratch
@@ -109,6 +140,8 @@ sparse_attn/
 ├── models/llama_ssa.py   # Llama 1B + SSA blocks
 └── ssa/alignment.py
 scripts/
+├── setup_hpc.sh          # Recommended SJSU HPC setup (micromamba)
+├── setup_hpc_legacy.sh   # Fallback for GLIBC 2.17
 ├── train_llama1b_ssa.py
 └── slurm/train_llama1b_h100.slurm
 ```
