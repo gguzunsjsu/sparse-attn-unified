@@ -2,7 +2,7 @@
 #SBATCH --job-name=ssa-llama1b
 #SBATCH --output=logs/ssa-llama1b-%j.out
 #SBATCH --error=logs/ssa-llama1b-%j.err
-#SBATCH --partition=gpu
+#SBATCH --partition=nsfql
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -10,7 +10,7 @@
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --mail-type=END
-#SBATCH --mail-user=YOUR_SJSU_ID@sjsu.edu
+#SBATCH --mail-user=gheorghi.guzun@sjsu.edu
 
 # SJSU CoE HPC — single H100 (nodes g2, g6), 256 GB RAM
 # Docs: https://www.sjsu.edu/cmpe/resources/hpc.php
