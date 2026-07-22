@@ -22,17 +22,33 @@ env/
 .DS_Store
 Thumbs.db
 
-# Project outputs
-outputs/
+# SLURM / HPC job artifacts
 logs/
+outputs/
+checkpoints/
+runs/
+slurm-*.out
+slurm-*.err
+ssa-llama1b-*.out
+ssa-llama1b-*.err
+gh_auth.log
+
+# Model checkpoints & weights
 *.pt
 *.pth
 *.ckpt
+*.safetensors
 
-# HuggingFace / caches
+# HuggingFace / caches (if stored under project)
 .cache/
 hf_home/
 
 # CUDA / Triton JIT
 .torch_extensions/
 triton_cache/
+
+# Experiment tracking
+wandb/
+mlruns/
+tensorboard/
+events.out.tfevents.*

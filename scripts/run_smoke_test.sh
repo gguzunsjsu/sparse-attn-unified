@@ -10,7 +10,9 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
 module purge
-module load cuda 2>/dev/null || true
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/scripts/load_cuda.sh"
+load_cuda_module
 
 # shellcheck source=/dev/null
 source "$PROJECT_ROOT/scripts/activate_env.sh"

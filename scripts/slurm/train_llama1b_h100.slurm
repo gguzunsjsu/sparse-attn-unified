@@ -41,7 +41,9 @@ cd "$PROJECT_ROOT"
 echo "PROJECT_ROOT=$PROJECT_ROOT"
 
 module purge
-module load cuda
+# shellcheck source=/dev/null
+source "$PROJECT_ROOT/scripts/load_cuda.sh"
+load_cuda_module
 
 # Do NOT module load python3 — use micromamba/conda env only.
 unset PYTHONPATH

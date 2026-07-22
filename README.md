@@ -66,7 +66,8 @@ bash scripts/setup_hpc_legacy.sh
 | `CUDA out of memory` during training | SSA runs FA + SA each layer | Use batch=1; ensure latest code (fixed sparse_attention memory bug) |
 | `ERROR: torch not installed in env 'ssa-h100'` | Env created but PyTorch install failed/skipped | `bash scripts/install_torch.sh` |
 | `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
-| `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | On GPU node: `module load cuda` before running Python |
+| `module(s) are unknown: "cuda"` | SJSU uses versioned modules (`cuda/12.1`), not bare `cuda` | Run `module avail cuda`; then `CUDA_MODULE=cuda/X.Y sbatch ...` |
+| `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | `bash scripts/load_cuda.sh` or set `CUDA_MODULE=cuda/12.1` |
 | `module avail` shows no cuda 12.x | Older CUDA module | Run `module avail cuda`; if only 11.x is available, reinstall torch for cu118: `pip install torch --index-url https://download.pytorch.org/whl/cu118` |
 
 Verify your env:
@@ -165,6 +166,8 @@ cd /scratch/rnd-guzun/sparse-attn-unified   # your clone path
 git pull
 mkdir -p logs
 # Edit mail-user in scripts/slurm/train_llama1b_h100.slurm
+# Optional: set CUDA module if auto-detect fails (check with: module avail cuda)
+# export CUDA_MODULE=cuda/12.1
 sbatch scripts/slurm/train_llama1b_h100.slurm
 ```
 
