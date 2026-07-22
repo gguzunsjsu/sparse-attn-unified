@@ -18,14 +18,27 @@
 # Request H100 explicitly (optional — omit to accept any GPU):
 #   #SBATCH --constraint=h100
 #
-# Usage:
+# Usage (run from the project directory):
+#   cd /scratch/rnd-guzun/sparse-attn-unified
 #   mkdir -p logs
 #   sbatch scripts/slurm/train_llama1b_h100.slurm
+#
+# Or override path explicitly:
+#   PROJECT_ROOT=/path/to/sparse-attn-unified sbatch scripts/slurm/train_llama1b_h100.slurm
 
 set -euo pipefail
 
-PROJECT_ROOT="${PROJECT_ROOT:-$HOME/sparse-attn-unified}"
+# SLURM copies this script to /var/spool/... — use submit directory, not script location.
+PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$HOME/sparse-attn-unified}}"
+if [[ ! -d "$PROJECT_ROOT/sparse_attn" ]]; then
+    echo "ERROR: PROJECT_ROOT invalid: $PROJECT_ROOT"
+    echo "Submit from the project directory:"
+    echo "  cd /scratch/rnd-guzun/sparse-attn-unified"
+    echo "  sbatch scripts/slurm/train_llama1b_h100.slurm"
+    exit 1
+fi
 cd "$PROJECT_ROOT"
+echo "PROJECT_ROOT=$PROJECT_ROOT"
 
 module purge
 module load cuda
@@ -47,8 +60,8 @@ mkdir -p logs outputs
 python scripts/train_llama1b_ssa.py \
   --sparse-backend socket \
   --seq-length 4096 \
-  --batch-size 2 \
-  --grad-accum 8 \
+  --batch-size 1 \
+  --grad-accum 16 \
   --max-steps 10000 \
   --lr 3e-4 \
   --base-model meta-llama/Llama-3.2-1B \

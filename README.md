@@ -158,11 +158,17 @@ bash scripts/setup_hpc.sh
 
 ### 5. Submit training job
 
+**Important:** run `sbatch` from the project directory (not `$HOME` unless the repo is cloned there).
+
 ```bash
+cd /scratch/rnd-guzun/sparse-attn-unified   # your clone path
+git pull
 mkdir -p logs
 # Edit mail-user in scripts/slurm/train_llama1b_h100.slurm
 sbatch scripts/slurm/train_llama1b_h100.slurm
 ```
+
+Monitor: `tail -f logs/ssa-llama1b-<jobid>.out`
 
 ## Memory Budget (1× H100 80 GB)
 
@@ -170,8 +176,8 @@ sbatch scripts/slurm/train_llama1b_h100.slurm
 |---------|-------|-----------|
 | Model | Llama 3.2 1B (~2 GB bf16) | SSA official baseline |
 | Seq length | 4096 | Fits dual-stream + alignment |
-| Batch size | 2 | Conservative for SA masks |
-| Grad accum | 8 | Effective batch = 16 |
+| Batch size | 1 | Safer for dual-stream SSA at seq 4096 |
+| Grad accum | 16 | Effective batch = 16 |
 | SOCKET `train_l` | 16 | Full `bucket_l=60` at inference |
 | FA checkpointing | on | Cuts FA activation VRAM |
 
