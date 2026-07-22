@@ -16,6 +16,10 @@ resolve_hpc_home() {
         echo "/home/$user"
         return
     fi
+    if [[ -n "$user" && -d "/fs/atipa/home/$user" ]]; then
+        echo "/fs/atipa/home/$user"
+        return
+    fi
     if [[ -n "$user" ]]; then
         getent passwd "$user" 2>/dev/null | cut -d: -f6
     fi
@@ -24,7 +28,53 @@ resolve_hpc_home() {
 HPC_HOME="$(resolve_hpc_home)"
 MAMBA_ROOT="${MAMBA_ROOT:-${HPC_HOME}/micromamba}"
 
-# Return 0 if env exists (by filesystem, not grep on env list output).
+# Find micromamba/mamba/conda executables (SJSU may use miniforge or .local/share/mamba).
+find_mamba_bin() {
+    local home="${HPC_HOME:-$(resolve_hpc_home)}"
+    local user="${USER:-}"
+    local candidates=(
+        "${MAMBA_ROOT}/bin/micromamba"
+        "${home}/micromamba/bin/micromamba"
+        "${home}/miniforge3/bin/micromamba"
+        "${home}/miniforge3/bin/mamba"
+        "${home}/.local/share/mamba/bin/micromamba"
+        "/fs/atipa/home/${user}/.local/share/mamba/bin/micromamba"
+    )
+    local c
+    for c in "${candidates[@]}"; do
+        if [[ -x "$c" ]]; then
+            echo "$c"
+            return 0
+        fi
+    done
+    if command -v micromamba &>/dev/null; then
+        command -v micromamba
+        return 0
+    fi
+    return 1
+}
+
+# Parse `micromamba env list` / `conda env list` for a named env prefix.
+_env_prefix_from_tool() {
+    local tool_bin="$1"
+    local name="$2"
+    local line prefix
+
+    while IFS= read -r line; do
+        # Match lines where first field is the env name (ignore header/separators)
+        if [[ "$line" =~ ^[[:space:]]*${name}[[:space:]] ]]; then
+            prefix="$(echo "$line" | awk '{print $NF}')"
+            if [[ -n "$prefix" && -d "$prefix" ]]; then
+                echo "$prefix"
+                return 0
+            fi
+        fi
+    done < <("$tool_bin" env list 2>/dev/null)
+
+    return 1
+}
+
+# Return 0 if env exists.
 env_exists() {
     local name="${1:-$ENV_NAME}"
     find_env_python "$name" >/dev/null 2>&1
@@ -34,7 +84,47 @@ env_exists() {
 find_env_python() {
     local name="${1:-$ENV_NAME}"
     local home="${HPC_HOME:-$(resolve_hpc_home)}"
+    local user="${USER:-}"
+    local prefix py mamba_bin
+
+    # 1. Ask micromamba/mamba where the env lives (handles .local/share/mamba, miniforge, etc.)
+    mamba_bin="$(find_mamba_bin 2>/dev/null || true)"
+    if [[ -n "$mamba_bin" ]]; then
+        prefix="$(_env_prefix_from_tool "$mamba_bin" "$name" || true)"
+        py="${prefix}/bin/python"
+        if [[ -x "$py" ]]; then
+            echo "$py"
+            return 0
+        fi
+    fi
+
+    # 2. Ask conda if available
+    if [[ -f "${home}/miniconda3/etc/profile.d/conda.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${home}/miniconda3/etc/profile.d/conda.sh"
+        prefix="$(_env_prefix_from_tool conda "$name" || true)"
+        py="${prefix}/bin/python"
+        if [[ -x "$py" ]]; then
+            echo "$py"
+            return 0
+        fi
+    fi
+    if [[ -f "${home}/miniforge3/etc/profile.d/conda.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${home}/miniforge3/etc/profile.d/conda.sh"
+        prefix="$(_env_prefix_from_tool conda "$name" || true)"
+        py="${prefix}/bin/python"
+        if [[ -x "$py" ]]; then
+            echo "$py"
+            return 0
+        fi
+    fi
+
+    # 3. Filesystem fallbacks (common HPC layouts)
     local candidates=(
+        "${home}/.local/share/mamba/envs/${name}/bin/python"
+        "/fs/atipa/home/${user}/.local/share/mamba/envs/${name}/bin/python"
+        "${home}/miniforge3/envs/${name}/bin/python"
         "${MAMBA_ROOT}/envs/${name}/bin/python"
         "${home}/micromamba/envs/${name}/bin/python"
         "${home}/miniconda3/envs/${name}/bin/python"
@@ -53,9 +143,8 @@ find_env_python() {
 # Activate env by PATH (most reliable on GPU nodes).
 activate_env_by_path() {
     local name="${1:-$ENV_NAME}"
-    local py
+    local py bindir
     py="$(find_env_python "$name")" || return 1
-    local bindir
     bindir="$(dirname "$py")"
     export PATH="${bindir}:$PATH"
     unset PYTHONPATH
@@ -64,26 +153,33 @@ activate_env_by_path() {
     return 0
 }
 
-# Try micromamba/conda activate; fall back to PATH.
+# Activate env: PATH first, then optional shell hook.
 activate_env() {
     local name="${1:-$ENV_NAME}"
+    local mamba_bin
 
-    if activate_env_by_path "$name"; then
-        # Optional: also run shell hook if available (for conda env vars)
-        if [[ -x "${MAMBA_ROOT}/bin/micromamba" ]]; then
-            eval "$("${MAMBA_ROOT}/bin/micromamba" shell hook -s bash)" 2>/dev/null || true
-            micromamba activate "$name" 2>/dev/null || true
-        elif [[ -f "${HPC_HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
-            # shellcheck source=/dev/null
-            source "${HPC_HOME}/miniconda3/etc/profile.d/conda.sh"
-            conda activate "$name" 2>/dev/null || true
-        fi
-        return 0
+    if ! activate_env_by_path "$name"; then
+        return 1
     fi
-    return 1
+
+    mamba_bin="$(find_mamba_bin 2>/dev/null || true)"
+    if [[ -n "$mamba_bin" ]]; then
+        eval "$("$mamba_bin" shell hook -s bash)" 2>/dev/null || true
+        micromamba activate "$name" 2>/dev/null || true
+    elif [[ -f "${HPC_HOME}/miniforge3/etc/profile.d/conda.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${HPC_HOME}/miniforge3/etc/profile.d/conda.sh"
+        conda activate "$name" 2>/dev/null || true
+    elif [[ -f "${HPC_HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
+        # shellcheck source=/dev/null
+        source "${HPC_HOME}/miniconda3/etc/profile.d/conda.sh"
+        conda activate "$name" 2>/dev/null || true
+    fi
+    return 0
 }
 
 print_hpc_diagnostics() {
+    local py mamba_bin
     echo "=== HPC diagnostics ==="
     echo "USER:       ${USER:-unset}"
     echo "HOME:       ${HOME:-unset}"
@@ -92,25 +188,25 @@ print_hpc_diagnostics() {
     echo "PWD:        $(pwd)"
     echo ""
     echo "Looking for env: ${ENV_NAME}"
-    local py
+
+    mamba_bin="$(find_mamba_bin 2>/dev/null || true)"
+    if [[ -n "$mamba_bin" ]]; then
+        echo "micromamba: $mamba_bin"
+    fi
+
     if py="$(find_env_python "$ENV_NAME" 2>/dev/null)"; then
         echo "Found python: $py"
     else
-        echo "Env python NOT found. Checked:"
+        echo "Env python NOT found via discovery."
+        echo "Known fallbacks include:"
+        echo "  ${HPC_HOME}/.local/share/mamba/envs/${ENV_NAME}/bin/python"
+        echo "  ${HPC_HOME}/miniforge3/envs/${ENV_NAME}/bin/python"
         echo "  ${MAMBA_ROOT}/envs/${ENV_NAME}/bin/python"
-        echo "  ${HPC_HOME}/micromamba/envs/${ENV_NAME}/bin/python"
-        echo "  ${HPC_HOME}/miniconda3/envs/${ENV_NAME}/bin/python"
     fi
-    if [[ -x "${MAMBA_ROOT}/bin/micromamba" ]]; then
+
+    if [[ -n "$mamba_bin" ]]; then
         echo ""
         echo "micromamba env list:"
-        "${MAMBA_ROOT}/bin/micromamba" env list 2>/dev/null || true
-    fi
-    if [[ -f "${HPC_HOME}/miniconda3/etc/profile.d/conda.sh" ]]; then
-        echo ""
-        echo "conda env list:"
-        # shellcheck source=/dev/null
-        source "${HPC_HOME}/miniconda3/etc/profile.d/conda.sh"
-        conda env list 2>/dev/null || true
+        "$mamba_bin" env list 2>/dev/null || true
     fi
 }
