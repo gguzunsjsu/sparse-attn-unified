@@ -25,4 +25,11 @@ if ! python -c "import numpy" 2>/dev/null; then
     python -m pip install "numpy>=1.26.0"
 fi
 
-python scripts/train_llama1b_ssa.py --smoke-test --from-scratch "$@"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+python scripts/train_llama1b_ssa.py \
+  --smoke-test \
+  --from-scratch \
+  --seq-length 512 \
+  --batch-size 1 \
+  "$@"

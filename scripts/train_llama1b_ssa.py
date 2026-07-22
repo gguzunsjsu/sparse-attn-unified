@@ -85,6 +85,16 @@ def main() -> None:
     if args.output_dir:
         cfg.output_dir = args.output_dir
 
+    if args.smoke_test:
+        # Safe defaults for dual-stream SSA smoke test on 1× H100
+        if args.seq_length == 4096:
+            cfg.seq_length = 512
+        if args.batch_size == 2:
+            cfg.per_device_batch_size = 1
+        # Lighter SOCKET settings for smoke test
+        cfg.socket.train_l = min(cfg.socket.train_l, 8)
+        cfg.socket.heavy_const = 0.15
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if cfg.bf16 and device == "cuda" else torch.float32
 

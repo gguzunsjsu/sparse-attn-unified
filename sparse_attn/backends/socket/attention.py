@@ -44,14 +44,46 @@ class SocketMasker(torch.nn.Module):
         logits = torch.einsum("bhqle,re->bhqlr", proj, self.bucket_signs) / self.cfg.tau
         return F.softmax(logits, dim=-1)
 
-    def score_keys(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-        """Soft collision scores [B, H, Q, T]."""
+    def score_keys(self, q: torch.Tensor, k: torch.Tensor, *, query_chunk: int = 256) -> torch.Tensor:
+        """Soft collision scores [B, H, Q, T]. Chunked over Q to limit peak VRAM."""
         codes = self._key_bucket_codes(k)
         soft_q = self._query_soft_scores(q)
         b, h, t, l_tables = codes.shape
         _, _, q_len, _, _ = soft_q.shape
 
-        scores = torch.zeros(b, h, q_len, t, device=q.device, dtype=q.dtype)
+        if q_len * t <= 512 * 512:
+            return self._score_keys_block(codes, soft_q, b, h, q_len, t, l_tables, q.device, q.dtype)
+
+        chunks = []
+        for q_start in range(0, q_len, query_chunk):
+            q_end = min(q_start + query_chunk, q_len)
+            block = self._score_keys_block(
+                codes,
+                soft_q[:, :, q_start:q_end, :, :],
+                b,
+                h,
+                q_end - q_start,
+                t,
+                l_tables,
+                q.device,
+                q.dtype,
+            )
+            chunks.append(block)
+        return torch.cat(chunks, dim=2)
+
+    def _score_keys_block(
+        self,
+        codes: torch.Tensor,
+        soft_q: torch.Tensor,
+        b: int,
+        h: int,
+        q_len: int,
+        t: int,
+        l_tables: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        scores = torch.zeros(b, h, q_len, t, device=device, dtype=dtype)
         for table_idx in range(l_tables):
             bucket = codes[..., table_idx]
             table_scores = torch.gather(

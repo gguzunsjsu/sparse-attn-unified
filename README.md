@@ -62,7 +62,8 @@ bash scripts/setup_hpc_legacy.sh
 | `PermissionError: ... /opt/ohpc/.../site-packages/...` | Using system `pip` from `module load python3` | Never install with system pip; activate `ssa-h100` first, use `python -m pip` |
 | `Defaulting to user installation because normal site-packages is not writeable` | Same as above — wrong Python | Run `which python` — must point to `~/micromamba/envs/ssa-h100/` or `~/miniconda3/envs/ssa-h100/` |
 | `ModuleNotFoundError: No module named 'sparse_attn'` | Project not installed in env | `bash scripts/install_project_deps.sh` |
-| `No module named 'numpy'` | torch installed without numpy | `bash scripts/install_project_deps.sh` |
+| `CUDA out of memory` during smoke test | Smoke test used seq=4096 + dual SSA streams | `git pull` and rerun `bash scripts/run_smoke_test.sh` (uses seq=512, batch=1) |
+| `CUDA out of memory` during training | SSA runs FA + SA each layer | Use batch=1; ensure latest code (fixed sparse_attention memory bug) |
 | `ERROR: torch not installed in env 'ssa-h100'` | Env created but PyTorch install failed/skipped | `bash scripts/install_torch.sh` |
 | `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
 | `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | On GPU node: `module load cuda` before running Python |

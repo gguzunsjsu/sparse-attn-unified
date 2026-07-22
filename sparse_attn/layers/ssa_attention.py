@@ -85,9 +85,10 @@ class SSADualStreamAttention(nn.Module):
 
         if self.cfg.checkpoint_fa:
             o_fa = checkpoint(fa_fn, q, k, v, use_reentrant=False)
+            o_sa = checkpoint(sa_fn, q, k, v, use_reentrant=False)
         else:
             o_fa = fa_fn(q, k, v)
-        o_sa = sa_fn(q, k, v)
+            o_sa = sa_fn(q, k, v)
 
         self._last_align_loss = alignment_distance(
             o_fa,

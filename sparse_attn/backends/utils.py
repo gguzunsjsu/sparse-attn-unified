@@ -47,9 +47,11 @@ def sparse_attention(
     b, h, q_len, d = q.shape
     k_sel = indices.shape[-1]
 
-    idx = indices.unsqueeze(-1).expand(b, h, q_len, k_sel, d)
-    k_g = torch.gather(k.unsqueeze(2).expand(b, h, q_len, k.size(2), d), 3, idx)
-    v_g = torch.gather(v.unsqueeze(2).expand(b, h, q_len, v.size(2), d), 3, idx)
+    # Advanced indexing — avoids materializing [B, H, Q, T, D] expand (OOM at long seq).
+    b_idx = torch.arange(b, device=q.device)[:, None, None, None]
+    h_idx = torch.arange(h, device=q.device)[None, :, None, None]
+    k_g = k[b_idx, h_idx, indices, :]
+    v_g = v[b_idx, h_idx, indices, :]
 
     scale = 1.0 / math.sqrt(d)
     scores = (q.unsqueeze(3) * k_g).sum(-1) * scale
