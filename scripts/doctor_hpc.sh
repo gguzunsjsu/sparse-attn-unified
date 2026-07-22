@@ -31,8 +31,19 @@ fi
 
 if [[ -d "$PROJECT_ROOT/sparse_attn" ]]; then
     echo "[OK] Project root: $PROJECT_ROOT"
+    if python -c "import sparse_attn" 2>/dev/null; then
+        echo "[OK] sparse_attn importable"
+    else
+        echo "[FAIL] sparse_attn not installed — run: bash scripts/install_project_deps.sh"
+    fi
 else
     echo "[FAIL] sparse_attn package not found under $PROJECT_ROOT"
+fi
+
+if python -c "import numpy" 2>/dev/null; then
+    echo "[OK] numpy installed"
+else
+    echo "[WARN] numpy missing — run: bash scripts/install_project_deps.sh"
 fi
 
 module load cuda 2>/dev/null && echo "[OK] cuda module loaded" || echo "[WARN] cuda module not loaded"

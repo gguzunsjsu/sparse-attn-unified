@@ -15,4 +15,14 @@ module load cuda 2>/dev/null || true
 # shellcheck source=/dev/null
 source "$PROJECT_ROOT/scripts/activate_env.sh"
 
+# Ensure sparse_attn + numpy are installed (common gap after install_torch.sh only)
+if ! python -c "import sparse_attn" 2>/dev/null; then
+    echo "Installing project dependencies..."
+    bash "$PROJECT_ROOT/scripts/install_project_deps.sh"
+fi
+
+if ! python -c "import numpy" 2>/dev/null; then
+    python -m pip install "numpy>=1.26.0"
+fi
+
 python scripts/train_llama1b_ssa.py --smoke-test --from-scratch "$@"

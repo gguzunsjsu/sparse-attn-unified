@@ -76,9 +76,13 @@ if ! python -c "import torch" 2>/dev/null; then
 fi
 
 echo "Installing project dependencies..."
-python -m pip install --upgrade pip
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install "numpy>=1.26.0"
 python -m pip install -e "$PROJECT_ROOT"
 python -m pip install transformers datasets accelerate einops pyyaml tqdm pytest huggingface_hub
+
+# Verify package import
+python -c "import sparse_attn; print('sparse_attn:', sparse_attn.__version__)"
 
 PYTHON_BIN="$(find_env_python "$ENV_NAME")"
 echo ""

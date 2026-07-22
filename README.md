@@ -61,7 +61,8 @@ bash scripts/setup_hpc_legacy.sh
 | `Installer requires GLIBC >=2.28, but system has 2.17` | Latest Miniconda too new for login node OS | Use `bash scripts/setup_hpc.sh` (micromamba) or `setup_hpc_legacy.sh` |
 | `PermissionError: ... /opt/ohpc/.../site-packages/...` | Using system `pip` from `module load python3` | Never install with system pip; activate `ssa-h100` first, use `python -m pip` |
 | `Defaulting to user installation because normal site-packages is not writeable` | Same as above — wrong Python | Run `which python` — must point to `~/micromamba/envs/ssa-h100/` or `~/miniconda3/envs/ssa-h100/` |
-| `ERROR: env 'ssa-h100' not found` | Setup never completed, or `$HOME` wrong on GPU node | Login node: `bash scripts/setup_hpc.sh`; then `bash scripts/doctor_hpc.sh` |
+| `ModuleNotFoundError: No module named 'sparse_attn'` | Project not installed in env | `bash scripts/install_project_deps.sh` |
+| `No module named 'numpy'` | torch installed without numpy | `bash scripts/install_project_deps.sh` |
 | `ERROR: torch not installed in env 'ssa-h100'` | Env created but PyTorch install failed/skipped | `bash scripts/install_torch.sh` |
 | `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
 | `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | On GPU node: `module load cuda` before running Python |
@@ -117,7 +118,8 @@ Each new GPU shell starts **without** your conda env. You must activate it every
 
 ```bash
 srun -p gpu --gres=gpu:1 --cpus-per-task=8 --mem=128G --time=01:00:00 --pty /bin/bash
-cd /fs/sfs/scratch/rnd-guzun/sparse-attn-unified   # or your clone path
+cd /scratch/rnd-guzun/sparse-attn-unified   # or your clone path
+bash scripts/install_project_deps.sh        # once per env
 bash scripts/run_smoke_test.sh
 ```
 
@@ -202,6 +204,7 @@ scripts/
 ├── activate_env.sh       # Source on every new shell (login or GPU)
 ├── doctor_hpc.sh         # Diagnose env / torch / paths
 ├── install_torch.sh      # Install PyTorch if missing
+├── install_project_deps.sh  # pip install -e . + numpy etc.
 ├── run_smoke_test.sh     # GPU smoke test wrapper
 ├── train_llama1b_ssa.py
 └── slurm/train_llama1b_h100.slurm
