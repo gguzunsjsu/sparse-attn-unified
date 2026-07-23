@@ -13,6 +13,7 @@ Usage (login node):
 from __future__ import annotations
 
 import argparse
+import gc
 import os
 import sys
 from pathlib import Path
@@ -44,6 +45,11 @@ def parse_args() -> argparse.Namespace:
         help="Delete partial model cache and download again (use after hf-xet failures)",
     )
     p.add_argument("--skip-data", action="store_true", help="Skip dataset tokenization")
+    p.add_argument(
+        "--resume-data",
+        action="store_true",
+        help="Resume tokenization from .progress sidecar (auto-detected if present)",
+    )
     return p.parse_args()
 
 
@@ -150,12 +156,36 @@ def download_model(model_id: str, local_dir: Path, *, force: bool = False) -> No
             ) from exc
         raise
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
-    print("Verifying local model load (offline)...")
-    AutoModelForCausalLM.from_pretrained(local_dir, local_files_only=True, trust_remote_code=True)
+    print("Verifying local model files (offline)...")
     AutoTokenizer.from_pretrained(local_dir, local_files_only=True, trust_remote_code=True)
+    required = ["config.json", "tokenizer.json"]
+    missing = [name for name in required if not (local_dir / name).exists()]
+    if missing:
+        raise FileNotFoundError(f"Model cache incomplete; missing: {missing}")
     print(f"Model OK: {local_dir}")
+
+
+def _progress_path(out_path: Path) -> Path:
+    return out_path.with_suffix(out_path.suffix + ".progress")
+
+
+def _read_progress(progress_path: Path) -> tuple[int, int]:
+    if not progress_path.is_file():
+        return 0, 0
+    written = 0
+    row = 0
+    for line in progress_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("written="):
+            written = int(line.split("=", 1)[1])
+        elif line.startswith("row="):
+            row = int(line.split("=", 1)[1])
+    return written, row
+
+
+def _write_progress(progress_path: Path, written: int, row: int) -> None:
+    progress_path.write_text(f"written={written}\nrow={row}\n", encoding="utf-8")
 
 
 def tokenize_dataset(
@@ -165,9 +195,21 @@ def tokenize_dataset(
     dataset_config: str,
     seq_length: int,
     num_sequences: int,
+    *,
+    resume: bool = False,
 ) -> None:
     from datasets import load_dataset
     from transformers import AutoTokenizer
+
+    progress_path = _progress_path(out_path)
+    start_written, start_row = (0, 0)
+    if resume and progress_path.is_file():
+        start_written, start_row = _read_progress(progress_path)
+        if start_written >= num_sequences:
+            print(f"Dataset already complete: {out_path} ({start_written} sequences)")
+            return
+        if start_written > 0:
+            print(f"Resuming tokenization from sequence {start_written} (dataset row {start_row})")
 
     print(f"Tokenizing {num_sequences} sequences (len={seq_length}) -> {out_path}")
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
@@ -177,35 +219,54 @@ def tokenize_dataset(
     ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    row_bytes = (seq_length + 1) * np.dtype(np.int32).itemsize
+    if start_written == 0 and out_path.exists():
+        out_path.unlink()
     memmap = np.memmap(
         out_path,
         dtype=np.int32,
-        mode="w+",
+        mode="w+" if start_written == 0 else "r+",
         shape=(num_sequences, seq_length + 1),
     )
 
+    # FineWeb pages can be multi-MB; tokenizing whole documents OOMs login nodes.
+    max_chars = (seq_length + 1) * 12
+    max_buffer_tokens = (seq_length + 1) * 8
+
     buffer: list[int] = []
-    written = 0
-    for row in ds:
-        ids = tokenizer(row["text"], add_special_tokens=True)["input_ids"]
+    written = start_written
+    row_idx = start_row - 1
+    for row_idx, row in enumerate(ds):
+        if row_idx < start_row:
+            continue
+        text = row["text"]
+        if len(text) > max_chars:
+            text = text[:max_chars]
+        ids = tokenizer(text, add_special_tokens=True)["input_ids"]
         buffer.extend(ids)
+        if len(buffer) > max_buffer_tokens:
+            buffer = buffer[-max_buffer_tokens:]
         while len(buffer) >= seq_length + 1 and written < num_sequences:
             chunk = buffer[: seq_length + 1]
             buffer = buffer[seq_length:]
             memmap[written] = np.asarray(chunk, dtype=np.int32)
             written += 1
             if written % 1000 == 0:
+                memmap.flush()
+                _write_progress(progress_path, written, row_idx + 1)
                 print(f"  {written}/{num_sequences} sequences", flush=True)
         if written >= num_sequences:
             break
 
     memmap.flush()
     if written < num_sequences:
+        _write_progress(progress_path, written, row_idx + 1)
         raise RuntimeError(
             f"Only tokenized {written}/{num_sequences} sequences. "
             "Increase streaming time or lower --num-sequences."
         )
-    print(f"Dataset OK: {out_path} ({written} sequences)")
+    progress_path.unlink(missing_ok=True)
+    print(f"Dataset OK: {out_path} ({written} sequences, {written * row_bytes / 1e9:.2f} GB)")
 
 
 def write_manifest(project_root: Path, model_dir: Path, data_path: Path, args: argparse.Namespace) -> None:
@@ -230,11 +291,17 @@ def main() -> None:
     if not args.skip_model:
         verify_hf_auth(args.model)
         download_model(args.model, model_dir, force=args.force_model_redownload)
+        gc.collect()
     elif model_dir.is_dir():
         print(f"Skipping model download; using {model_dir}")
     else:
         print(f"ERROR: --skip-model but {model_dir} not found", file=sys.stderr)
         sys.exit(1)
+
+    progress_path = _progress_path(data_path)
+    resume_data = args.resume_data or (
+        not args.skip_data and progress_path.is_file() and _read_progress(progress_path)[0] < args.num_sequences
+    )
 
     if not args.skip_data:
         tokenize_dataset(
@@ -244,6 +311,7 @@ def main() -> None:
             args.dataset_config,
             args.seq_length,
             args.num_sequences,
+            resume=resume_data,
         )
 
     write_manifest(project_root, model_dir, data_path, args)
