@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 import torch
@@ -24,6 +25,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=10_000)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--base-model", type=str, default="meta-llama/Llama-3.2-1B")
+    p.add_argument(
+        "--local-model-dir",
+        type=str,
+        default=None,
+        help="Local model directory (required on offline GPU nodes)",
+    )
+    p.add_argument(
+        "--local-data-bin",
+        type=str,
+        default=None,
+        help="Memmap tokenized data (.bin) from prefetch_offline_assets.py",
+    )
     p.add_argument("--from-scratch", action="store_true")
     p.add_argument("--smoke-test", action="store_true", help="Run 5 steps on random data")
     return p.parse_args()
@@ -38,6 +51,29 @@ class RandomTokenDataset(IterableDataset):
         while True:
             ids = torch.randint(0, self.vocab_size, (self.seq_length + 1,))
             yield {"input_ids": ids[:-1], "labels": ids[1:]}
+
+
+class LocalMemmapDataset(IterableDataset):
+    """Read pre-tokenized sequences from prefetch_offline_assets.py (offline-safe)."""
+
+    def __init__(self, bin_path: Path, seq_length: int):
+        import numpy as np
+
+        self.seq_length = seq_length
+        self.data = np.memmap(bin_path, dtype=np.int32, mode="r")
+        if self.data.size % (seq_length + 1) != 0:
+            raise ValueError(f"Invalid bin file shape for seq_length={seq_length}: {bin_path}")
+        self.num_rows = self.data.size // (seq_length + 1)
+        self.data = self.data.reshape(self.num_rows, seq_length + 1)
+
+    def __iter__(self):
+        import numpy as np
+
+        while True:
+            perm = np.random.permutation(self.num_rows)
+            for idx in perm:
+                row = torch.from_numpy(self.data[idx].copy())
+                yield {"input_ids": row[:-1], "labels": row[1:]}
 
 
 class StreamingTextDataset(IterableDataset):
@@ -71,8 +107,20 @@ def collate(batch):
     return {"input_ids": input_ids, "labels": labels}
 
 
+def resolve_offline_paths(project_root: Path, args: argparse.Namespace) -> tuple[Path | None, Path | None]:
+    """Default local paths from prefetch script."""
+    model_dir = Path(args.local_model_dir) if args.local_model_dir else project_root / "cache/models/Llama-3.2-1B"
+    data_bin = Path(args.local_data_bin) if args.local_data_bin else project_root / f"cache/data/train_{args.seq_length}.bin"
+    model_path = model_dir if model_dir.is_dir() else None
+    data_path = data_bin if data_bin.is_file() else None
+    return model_path, data_path
+
+
 def main() -> None:
     args = parse_args()
+    project_root = Path(__file__).resolve().parent.parent
+    offline = os.environ.get("HF_HUB_OFFLINE", "0") == "1" or os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
+    local_model, local_data = resolve_offline_paths(project_root, args)
     cfg = HPCConfig(
         seq_length=args.seq_length,
         per_device_batch_size=args.batch_size,
@@ -101,7 +149,19 @@ def main() -> None:
     if args.from_scratch or args.smoke_test:
         model = LlamaSSAModel(cfg, training=True).to(device=device, dtype=dtype)
     else:
-        model = LlamaSSAModel.from_pretrained_base(cfg.base_model, cfg, device=device)
+        model_source = str(local_model) if local_model else cfg.base_model
+        local_files_only = offline or local_model is not None
+        if offline and local_model is None:
+            raise FileNotFoundError(
+                f"Offline mode but model not found at {project_root / 'cache/models/Llama-3.2-1B'}. "
+                "Run on login node: bash scripts/prefetch_offline_assets.sh"
+            )
+        model = LlamaSSAModel.from_pretrained_base(
+            model_source,
+            cfg,
+            device=device,
+            local_files_only=local_files_only,
+        )
         model = model.to(dtype=dtype)
 
     print(f"Parameters: {model.num_parameters() / 1e9:.2f}B")
@@ -127,11 +187,23 @@ def main() -> None:
 
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(cfg.base_model, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    dataset = StreamingTextDataset(cfg, tokenizer)
+    if local_data is not None:
+        print(f"Using offline data: {local_data}")
+        dataset = LocalMemmapDataset(local_data, cfg.seq_length)
+    elif offline:
+        raise FileNotFoundError(
+            f"Offline mode but data not found at {project_root / f'cache/data/train_{cfg.seq_length}.bin'}. "
+            "Run on login node: bash scripts/prefetch_offline_assets.sh"
+        )
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            str(local_model) if local_model else cfg.base_model,
+            trust_remote_code=True,
+            local_files_only=local_model is not None,
+        )
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        dataset = StreamingTextDataset(cfg, tokenizer)
     loader = DataLoader(
         dataset,
         batch_size=cfg.per_device_batch_size,

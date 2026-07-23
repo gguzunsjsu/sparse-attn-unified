@@ -42,6 +42,7 @@ gh_auth.log
 # HuggingFace / caches (if stored under project)
 .cache/
 hf_home/
+cache/
 
 # CUDA / Triton JIT
 .torch_extensions/

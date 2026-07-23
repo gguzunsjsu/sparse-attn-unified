@@ -66,6 +66,7 @@ bash scripts/setup_hpc_legacy.sh
 | `CUDA out of memory` during training | SSA runs FA + SA each layer | Use batch=1; ensure latest code (fixed sparse_attention memory bug) |
 | `ERROR: torch not installed in env 'ssa-h100'` | Env created but PyTorch install failed/skipped | `bash scripts/install_torch.sh` |
 | `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
+| `Network is unreachable` / HuggingFace download on GPU node | GPU nodes have no internet | Run `bash scripts/prefetch_offline_assets.sh` on **login node** first |
 | `module(s) are unknown: "cuda"` | SJSU uses versioned modules (`cuda/12.1`), not bare `cuda` | Run `module avail cuda`; then `CUDA_MODULE=cuda/X.Y sbatch ...` |
 | `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | `bash scripts/load_cuda.sh` or set `CUDA_MODULE=cuda/12.1` |
 | `module avail` shows no cuda 12.x | Older CUDA module | Run `module avail cuda`; if only 11.x is available, reinstall torch for cu118: `pip install torch --index-url https://download.pytorch.org/whl/cu118` |
@@ -97,6 +98,33 @@ huggingface-cli login
 python -m huggingface_hub.cli.huggingface_cli login
 
 export HF_HOME=$HOME/.cache/huggingface
+```
+
+### 3b. Prefetch assets for offline GPU nodes (required)
+
+**GPU nodes have no internet.** Download the model and tokenized training data on the **login node** before `sbatch`:
+
+```bash
+cd /scratch/rnd-guzun/sparse-attn-unified
+source scripts/activate_env.sh
+huggingface-cli login                    # once, for gated Llama 3.2 1B
+bash scripts/prefetch_offline_assets.sh
+```
+
+This creates (under your project on scratch):
+
+| Path | Contents |
+|------|----------|
+| `cache/models/Llama-3.2-1B/` | Full model + tokenizer (~2.5 GB) |
+| `cache/data/train_4096.bin` | 170k tokenized sequences (~2.8 GB) |
+
+Prefetch takes **~30–90 min** on the login node depending on network. After it completes, SLURM jobs run fully offline (`HF_HUB_OFFLINE=1`).
+
+Verify:
+
+```bash
+ls -lh cache/models/Llama-3.2-1B/config.json
+ls -lh cache/data/train_4096.bin
 ```
 
 If you still get `command not found`, check you're in the right env:
@@ -214,7 +242,9 @@ scripts/
 ├── activate_env.sh       # Source on every new shell (login or GPU)
 ├── doctor_hpc.sh         # Diagnose env / torch / paths
 ├── install_torch.sh      # Install PyTorch if missing
-├── install_project_deps.sh  # pip install -e . + numpy etc.
+├── install_project_deps.sh     # pip install -e . + numpy etc.
+├── prefetch_offline_assets.sh  # Login node: download model + data
+├── prefetch_offline_assets.py
 ├── run_smoke_test.sh     # GPU smoke test wrapper
 ├── train_llama1b_ssa.py
 └── slurm/train_llama1b_h100.slurm

@@ -49,9 +49,27 @@ load_cuda_module
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+export HF_DATASETS_OFFLINE=1
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=8
+
+# Require offline assets (download on login node first)
+MODEL_DIR="$PROJECT_ROOT/cache/models/Llama-3.2-1B"
+DATA_BIN="$PROJECT_ROOT/cache/data/train_4096.bin"
+if [[ ! -d "$MODEL_DIR" ]]; then
+    echo "ERROR: Model not prefetched: $MODEL_DIR"
+    echo "Run on login node: bash scripts/prefetch_offline_assets.sh"
+    exit 1
+fi
+if [[ ! -f "$DATA_BIN" ]]; then
+    echo "ERROR: Training data not prefetched: $DATA_BIN"
+    echo "Run on login node: bash scripts/prefetch_offline_assets.sh"
+    exit 1
+fi
+echo "Offline assets OK: model + data"
 
 # Activate env via shared helpers (handles empty $HOME on compute nodes)
 # shellcheck source=/dev/null
@@ -66,7 +84,8 @@ python scripts/train_llama1b_ssa.py \
   --grad-accum 16 \
   --max-steps 10000 \
   --lr 3e-4 \
-  --base-model meta-llama/Llama-3.2-1B \
+  --local-model-dir "$MODEL_DIR" \
+  --local-data-bin "$DATA_BIN" \
   --output-dir "$PROJECT_ROOT/outputs/llama1b-ssa-socket-${SLURM_JOB_ID}"
 
 echo "Job finished at $(date)"

@@ -216,14 +216,16 @@ class LlamaSSAModel(nn.Module):
         model_name: str,
         hpc_cfg: HPCConfig,
         device: str = "cpu",
+        local_files_only: bool = False,
     ) -> "LlamaSSAModel":
-        """Initialize SSA model weights from HuggingFace Llama 3.2 1B."""
+        """Initialize SSA model weights from HuggingFace Llama 3.2 1B or a local directory."""
         from transformers import AutoModelForCausalLM
 
         base = AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16 if hpc_cfg.bf16 else torch.float32,
             trust_remote_code=True,
+            local_files_only=local_files_only,
         )
         model = cls(hpc_cfg, training=True).to(device)
         src = base.state_dict()

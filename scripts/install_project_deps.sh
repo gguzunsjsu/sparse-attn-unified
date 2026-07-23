@@ -25,7 +25,7 @@ echo "Installing into: $(which python)"
 python -m pip install --upgrade pip setuptools wheel
 
 # Core runtime deps (numpy often missing when torch installed via pip alone)
-python -m pip install "numpy>=1.26.0" einops pyyaml tqdm
+python -m pip install "numpy>=1.26.0" einops pyyaml tqdm datasets
 
 # Editable install registers the sparse_attn package
 python -m pip install -e "$PROJECT_ROOT"
