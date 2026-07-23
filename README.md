@@ -124,9 +124,9 @@ This creates (under your project on scratch):
 | Path | Contents |
 |------|----------|
 | `cache/models/Llama-3.2-1B/` | Full model + tokenizer (~2.5 GB) |
-| `cache/datasets/fineweb_parquet/` | ~6 parquet shards (login node download) |
-| `cache/datasets/fineweb_raw.jsonl` | Built offline on GPU node (~47k docs) |
-| `cache/data/train_4096.bin` | Built offline on GPU node (~1.4 GB) |
+| `cache/datasets/fineweb_parquet/` | ~12 parquet shards (login node download) |
+| `cache/datasets/fineweb_raw.jsonl` | Built offline on GPU node (~96k docs for 40k seq @ 2048) |
+| `cache/data/train_2048.bin` | Built offline on GPU node (~0.33 GB) |
 
 The SLURM job builds JSONL (if needed), tokenizes, then trains. Re-runs skip steps when outputs already exist.
 

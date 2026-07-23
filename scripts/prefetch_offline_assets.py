@@ -24,6 +24,10 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 import numpy as np
 
+# Empirical FineWeb sample-10BT density on HPC (~976 Llama tokens/doc after truncation).
+FINEWEB_AVG_TOKENS_PER_DOC = 900
+DEFAULT_PARQUET_SHARDS = 12
+
 
 def infer_row_width(total_size: int, seq_length: int) -> int:
     """Infer tokens-per-row from flat memmap size."""
@@ -286,14 +290,15 @@ def parquet_shard_dir(project_root: Path) -> Path:
 
 
 def _min_raw_docs(num_sequences: int, seq_length: int) -> int:
-    """Minimum JSONL docs when built with the same ``seq_length`` as tokenization.
+    """Minimum JSONL docs for tokenization at ``seq_length``.
 
-    Truncated docs usually yield 2+ training sequences after cross-doc buffering.
-    ``seq_length`` is accepted so callers document intent; the target is sized for
-    FineWeb with ~6 parquet shards (~47k docs).
+    FineWeb docs average ~950 Llama tokens after truncation (HPC measured ~976).
+    The old ``num_sequences // 2`` rule assumed ~2 seq/doc and fails at seq=4096.
     """
-    _ = seq_length
-    return num_sequences // 2 + 5_000
+    tokens_needed = num_sequences * (seq_length + 1)
+    avg = FINEWEB_AVG_TOKENS_PER_DOC
+    margin = 5_000
+    return (tokens_needed + avg - 1) // avg + margin
 
 
 def count_bin_rows(bin_path: Path, *, seq_length: int | None = None) -> int:
@@ -331,16 +336,18 @@ def download_parquet_shards(
     dataset_name: str,
     shard_dir: Path,
     *,
-    num_shards: int = 6,
+    num_shards: int = DEFAULT_PARQUET_SHARDS,
 ) -> list[Path]:
     from huggingface_hub import hf_hub_download
 
     shard_dir.mkdir(parents=True, exist_ok=True)
     cached = sorted(shard_dir.rglob("*.parquet"))
-    min_docs_shard = 6  # reuse cache if we already have enough shards
-    if len(cached) >= min_docs_shard:
+    if len(cached) >= num_shards:
         print(f"Using {len(cached)} cached parquet shards in {shard_dir}")
         return cached
+
+    if cached:
+        print(f"Have {len(cached)} parquet shards but need {num_shards}; downloading more...")
 
     selected = _list_parquet_shards(dataset_name, num_shards)
     print(f"Downloading {len(selected)} parquet shards -> {shard_dir}")
@@ -422,7 +429,9 @@ def build_jsonl_from_parquet(
     if docs_written < min_docs:
         raise RuntimeError(
             f"Only cached {docs_written}/{min_docs} docs from {len(parquet_files)} parquet shards. "
-            "Download more shards on the login node or lower --num-sequences."
+            f"Need ~{min_docs} docs for {num_sequences} sequences at seq_length={seq_length}. "
+            "Download more shards on the login node "
+            f"(prefetch uses {DEFAULT_PARQUET_SHARDS} by default) or lower --num-sequences."
         )
     print(f"Raw JSONL OK: {out_path} ({docs_written} docs, {out_path.stat().st_size / 1e9:.2f} GB)")
 
@@ -438,7 +447,7 @@ def cache_raw_dataset(
     force: bool = False,
     parquet_only: bool = False,
 ) -> None:
-    download_parquet_shards(dataset_name, parquet_shard_dir(project_root), num_shards=6)
+    download_parquet_shards(dataset_name, parquet_shard_dir(project_root), num_shards=DEFAULT_PARQUET_SHARDS)
     if parquet_only:
         print("Parquet shards ready. JSONL build will run offline in the SLURM job.")
         return
@@ -555,8 +564,6 @@ def tokenize_dataset(
                 text = text[:max_chars]
             ids = tokenizer(text, add_special_tokens=True)["input_ids"]
             buffer.extend(ids)
-            if len(buffer) > max_buffer_tokens:
-                buffer = buffer[-max_buffer_tokens:]
             while len(buffer) >= seq_length + 1 and written < num_sequences:
                 for i, tok in enumerate(buffer[: seq_length + 1]):
                     chunk_buf[i] = tok
@@ -567,29 +574,31 @@ def tokenize_dataset(
                     out_f.flush()
                     _write_progress(progress_path, written, row_idx + 1)
                     print(f"  {written}/{num_sequences} sequences", flush=True)
+            if len(buffer) > max_buffer_tokens:
+                buffer = buffer[-max_buffer_tokens:]
             if written >= num_sequences:
                 break
 
     if written < num_sequences:
         _write_progress(progress_path, written, row_idx + 1)
         rows_consumed = row_idx + 1
+        seq_per_doc = written / max(rows_consumed, 1)
         hint = (
-            "Delete the JSONL and re-run build-jsonl-only with matching --seq-length, "
-            "or lower --num-sequences."
+            f"Got {seq_per_doc:.2f} sequences/doc (need ~{(seq_length + 1) / FINEWEB_AVG_TOKENS_PER_DOC:.2f} "
+            f"at seq_length={seq_length}). Delete the JSONL or run with --force-raw-recache to rebuild "
+            f"with >= {_min_raw_docs(num_sequences, seq_length)} docs, then resubmit."
         )
-        if local_raw_path is not None:
-            doc_count = _count_jsonl_docs(local_raw_path)
-            min_docs = _min_raw_docs(num_sequences, seq_length)
-            hint = (
-                f"Raw JSONL has {doc_count} docs (need >= {min_docs} for seq_length={seq_length}); "
-                "delete it or run with --force-raw-recache, then resubmit."
-            )
         raise RuntimeError(
             f"Only tokenized {written}/{num_sequences} sequences "
             f"(dataset rows consumed={rows_consumed}). {hint}"
         )
     progress_path.unlink(missing_ok=True)
-    print(f"Dataset OK: {out_path} ({written} sequences, {written * row_bytes / 1e9:.2f} GB)")
+    rows_used = row_idx + 1
+    print(
+        f"Dataset OK: {out_path} ({written} sequences, {written * row_bytes / 1e9:.2f} GB, "
+        f"{rows_used} JSONL docs, {written / max(rows_used, 1):.2f} seq/doc)",
+        flush=True,
+    )
     validate_data_bin(out_path, seq_length=seq_length)
 
 

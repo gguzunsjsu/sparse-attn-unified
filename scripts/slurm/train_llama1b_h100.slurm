@@ -63,14 +63,18 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=8
 
 SEQ_LENGTH=2048
-TOKENIZE_SEQ=4096
-NUM_SEQUENCES=85000
+# Tokenize at the same length as training (FineWeb docs ~1k tokens each).
+TOKENIZE_SEQ=2048
+# 2000 steps x grad_accum 16 = 32k samples; keep modest headroom for shuffling.
+NUM_SEQUENCES=40000
 MODEL_DIR="$PROJECT_ROOT/cache/models/Llama-3.2-1B"
 PARQUET_DIR="$PROJECT_ROOT/cache/datasets/fineweb_parquet"
 RAW_DATA="$PROJECT_ROOT/cache/datasets/fineweb_raw.jsonl"
-# Tokenize at 4096 once; training slices to SEQ_LENGTH (2048).
 DATA_BIN="$PROJECT_ROOT/cache/data/train_${TOKENIZE_SEQ}.bin"
 MAX_STEPS=2000
+
+# Drop stale artifacts from earlier 4096-tokenize / undersized JSONL runs.
+rm -f "$PROJECT_ROOT/cache/data/train_4096.bin" "$PROJECT_ROOT/cache/data/train_4096.bin.progress"
 
 if [[ ! -d "$MODEL_DIR" ]]; then
     echo "ERROR: Model not prefetched: $MODEL_DIR"

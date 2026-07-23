@@ -39,8 +39,8 @@ fi
 
 python scripts/prefetch_offline_assets.py \
   --project-root "$PROJECT_ROOT" \
-  --seq-length 4096 \
-  --num-sequences 85000 \
+  --seq-length 2048 \
+  --num-sequences 40000 \
   --skip-data \
   --parquet-only \
   "$@"
