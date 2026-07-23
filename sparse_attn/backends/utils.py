@@ -36,6 +36,8 @@ def sparse_attention(
     k: torch.Tensor,
     v: torch.Tensor,
     indices: torch.LongTensor,
+    *,
+    query_chunk: int = 512,
 ) -> torch.Tensor:
     """
     Gather selected keys/values and compute causal softmax attention.
@@ -44,17 +46,39 @@ def sparse_attention(
     k, v: [B, H, T, D]
     indices: [B, H, Q, K_sel] key positions per query
     """
-    b, h, q_len, d = q.shape
-    k_sel = indices.shape[-1]
+    _, _, q_len, _ = q.shape
+    if q_len <= query_chunk:
+        return _sparse_attention_block(q, k, v, indices)
 
-    # Advanced indexing — avoids materializing [B, H, Q, T, D] expand (OOM at long seq).
+    chunks = []
+    for q_start in range(0, q_len, query_chunk):
+        q_end = min(q_start + query_chunk, q_len)
+        chunks.append(
+            _sparse_attention_block(
+                q[:, :, q_start:q_end, :],
+                k,
+                v,
+                indices[:, :, q_start:q_end, :],
+            )
+        )
+    return torch.cat(chunks, dim=2)
+
+
+def _sparse_attention_block(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    indices: torch.LongTensor,
+) -> torch.Tensor:
+    b, h, q_len, d = q.shape
+
     b_idx = torch.arange(b, device=q.device)[:, None, None, None]
     h_idx = torch.arange(h, device=q.device)[None, :, None, None]
     k_g = k[b_idx, h_idx, indices, :]
     v_g = v[b_idx, h_idx, indices, :]
 
     scale = 1.0 / math.sqrt(d)
-    scores = (q.unsqueeze(3) * k_g).sum(-1) * scale
+    scores = torch.einsum("bhqd,bhqkd->bhqk", q, k_g) * scale
 
     key_pos = indices
     query_pos = torch.arange(q_len, device=q.device).view(1, 1, q_len, 1)
@@ -62,8 +86,7 @@ def sparse_attention(
     scores = scores.masked_fill(causal, float("-inf"))
 
     probs = F.softmax(scores, dim=-1)
-    out = (probs.unsqueeze(-1) * v_g).sum(-2)
-    return out
+    return torch.einsum("bhqk,bhqkd->bhqd", probs, v_g)
 
 
 def always_keep_indices(

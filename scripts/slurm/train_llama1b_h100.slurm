@@ -121,11 +121,11 @@ fi
 python scripts/train_llama1b_ssa.py \
   --sparse-backend socket \
   --seq-length "$SEQ_LENGTH" \
-  --batch-size 2 \
-  --grad-accum 8 \
+  --batch-size 1 \
+  --grad-accum 16 \
   --max-steps "$MAX_STEPS" \
   --lr 3e-4 \
-  --no-checkpoint-fa \
+  --checkpoint-fa \
   --socket-train-l 8 \
   --local-model-dir "$MODEL_DIR" \
   --local-data-bin "$DATA_BIN" \
