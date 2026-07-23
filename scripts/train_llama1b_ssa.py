@@ -72,8 +72,10 @@ class LocalMemmapDataset(IterableDataset):
         while True:
             perm = np.random.permutation(self.num_rows)
             for idx in perm:
-                row = torch.from_numpy(self.data[idx].copy())
-                yield {"input_ids": row[:-1], "labels": row[1:]}
+                # int32 memmap -> int64 for CUDA embed / cross_entropy; labels match
+                # input_ids so the model's internal shift aligns with next-token targets.
+                input_ids = torch.from_numpy(self.data[idx, :-1].copy()).long()
+                yield {"input_ids": input_ids, "labels": input_ids.clone()}
 
 
 class StreamingTextDataset(IterableDataset):
@@ -102,8 +104,8 @@ class StreamingTextDataset(IterableDataset):
 
 
 def collate(batch):
-    input_ids = torch.stack([b["input_ids"] for b in batch])
-    labels = torch.stack([b["labels"] for b in batch])
+    input_ids = torch.stack([b["input_ids"] for b in batch]).long()
+    labels = torch.stack([b["labels"] for b in batch]).long()
     return {"input_ids": input_ids, "labels": labels}
 
 
