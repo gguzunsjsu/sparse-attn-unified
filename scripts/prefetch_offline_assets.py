@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
         help="Read only from local caches (no HuggingFace Hub / dataset downloads)",
     )
     p.add_argument(
+        "--force-raw-recache",
+        action="store_true",
+        help="Delete partial raw JSONL/parquet cache and rebuild from parquet shards",
+    )
+    p.add_argument(
         "--resume-data",
         action="store_true",
         help="Resume tokenization from .progress sidecar (auto-detected if present)",
@@ -191,31 +196,66 @@ def _raw_progress_path(out_path: Path) -> Path:
     return out_path.with_suffix(out_path.suffix + ".progress")
 
 
-def _read_raw_progress(progress_path: Path) -> tuple[int, int]:
-    if not progress_path.is_file():
-        return 0, 0
-    chars = 0
-    row = 0
-    for line in progress_path.read_text(encoding="utf-8").splitlines():
-        if line.startswith("chars="):
-            chars = int(line.split("=", 1)[1])
-        elif line.startswith("row="):
-            row = int(line.split("=", 1)[1])
-    return chars, row
+def parquet_shard_dir(project_root: Path) -> Path:
+    return project_root / "cache" / "datasets" / "fineweb_parquet"
 
 
-def _write_raw_progress(progress_path: Path, chars: int, row: int) -> None:
-    progress_path.write_text(f"chars={chars}\nrow={row}\n", encoding="utf-8")
+def _min_raw_docs(num_sequences: int) -> int:
+    # Truncated docs usually yield 2+ training sequences after buffering.
+    return num_sequences // 2 + 5_000
 
 
-def _min_raw_chars(num_sequences: int, seq_length: int) -> int:
-    # Tokenization truncates each doc; ~2 chars/token is enough raw text.
-    max_doc_chars = (seq_length + 1) * 12
-    min_docs = max(num_sequences // 2, 10_000)
-    return min(
-        int(num_sequences * (seq_length + 1) * 2),
-        min_docs * max_doc_chars,
+def _count_jsonl_docs(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    count = 0
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
+def _list_parquet_shards(dataset_name: str, num_shards: int) -> list[str]:
+    from huggingface_hub import HfApi
+
+    api = HfApi()
+    all_files = sorted(
+        f for f in api.list_repo_files(dataset_name, repo_type="dataset") if f.endswith(".parquet")
     )
+    if not all_files:
+        raise RuntimeError(f"No parquet files found in dataset repo {dataset_name}")
+    return all_files[:num_shards]
+
+
+def download_parquet_shards(
+    dataset_name: str,
+    shard_dir: Path,
+    *,
+    num_shards: int = 6,
+) -> list[Path]:
+    from huggingface_hub import hf_hub_download
+
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    cached = sorted(shard_dir.rglob("*.parquet"))
+    min_docs_shard = 6  # reuse cache if we already have enough shards
+    if len(cached) >= min_docs_shard:
+        print(f"Using {len(cached)} cached parquet shards in {shard_dir}")
+        return cached
+
+    selected = _list_parquet_shards(dataset_name, num_shards)
+    print(f"Downloading {len(selected)} parquet shards -> {shard_dir}")
+    paths: list[Path] = []
+    for relpath in selected:
+        local = hf_hub_download(
+            repo_id=dataset_name,
+            filename=relpath,
+            repo_type="dataset",
+            local_dir=str(shard_dir),
+        )
+        paths.append(Path(local))
+        print(f"  {relpath}", flush=True)
+    return paths
 
 
 def cache_raw_dataset(
@@ -224,79 +264,63 @@ def cache_raw_dataset(
     dataset_config: str,
     num_sequences: int,
     seq_length: int,
+    project_root: Path,
     *,
-    resume: bool = False,
+    force: bool = False,
 ) -> None:
-    import time
+    import pyarrow.parquet as pq
 
-    from datasets import load_dataset
-
-    min_chars = _min_raw_chars(num_sequences, seq_length)
+    min_docs = _min_raw_docs(num_sequences)
     max_doc_chars = (seq_length + 1) * 12
-    progress_path = _raw_progress_path(out_path)
-    start_chars, start_row = (0, 0)
-    if resume and progress_path.is_file():
-        start_chars, start_row = _read_raw_progress(progress_path)
-        if start_chars >= min_chars:
-            print(f"Raw dataset already cached: {out_path} ({start_chars / 1e9:.2f} GB chars)")
-            progress_path.unlink(missing_ok=True)
-            return
-        if start_chars > 0:
-            print(
-                f"Resuming raw cache from stream row {start_row} "
-                f"({start_chars / 1e9:.2f} / {min_chars / 1e9:.2f} GB chars)"
-            )
+    shard_dir = parquet_shard_dir(project_root)
 
-    print(f"Caching raw text -> {out_path} (target >= {min_chars / 1e9:.2f} GB chars)")
-    ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
-    if start_row > 0:
-        print(f"Skipping to stream row {start_row} (no re-download of earlier rows)...")
-        ds = ds.skip(start_row)
+    if force:
+        if out_path.exists():
+            out_path.unlink()
+        _raw_progress_path(out_path).unlink(missing_ok=True)
+
+    docs_written = _count_jsonl_docs(out_path)
+    if docs_written >= min_docs:
+        print(f"Raw dataset already cached: {out_path} ({docs_written} docs)")
+        _raw_progress_path(out_path).unlink(missing_ok=True)
+        return
+
+    if docs_written > 0:
+        print(f"Removing incomplete JSONL ({docs_written}/{min_docs} docs) and rebuilding...")
+        out_path.unlink()
+        docs_written = 0
+
+    parquet_files = download_parquet_shards(dataset_name, shard_dir, num_shards=6)
+    print(f"Building JSONL from local parquet -> {out_path} (target {min_docs} docs)")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_mode = "a" if start_chars > 0 and out_path.is_file() else "w"
-    total_chars = start_chars
-    stream_row = start_row
-    t0 = time.monotonic()
-    last_report = t0
-    with open(out_path, out_mode, encoding="utf-8") as out_f:
-        for offset, row in enumerate(ds):
-            stream_row = start_row + offset
-            text = row["text"]
-            if not text:
-                continue
-            if len(text) > max_doc_chars:
-                text = text[:max_doc_chars]
-            out_f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
-            total_chars += len(text)
-            now = time.monotonic()
-            if offset % 100 == 0 or total_chars >= min_chars or now - last_report >= 30:
-                out_f.flush()
-                os.fsync(out_f.fileno())
-                _write_raw_progress(progress_path, total_chars, stream_row + 1)
-                elapsed = now - t0
-                rate = (total_chars - start_chars) / max(elapsed, 1e-6)
-                remaining = max(0, min_chars - total_chars)
-                eta_s = remaining / rate if rate > 0 else 0
-                print(
-                    f"  stream row {stream_row + 1}: "
-                    f"{total_chars / 1e9:.2f}/{min_chars / 1e9:.2f} GB chars "
-                    f"({rate / 1e6:.1f} MB/s"
-                    f"{f', ~{eta_s / 60:.0f} min left' if eta_s > 0 else ''})",
-                    flush=True,
-                )
-                last_report = now
-            if total_chars >= min_chars:
+    with open(out_path, "w", encoding="utf-8") as out_f:
+        for pq_path in parquet_files:
+            parquet = pq.ParquetFile(pq_path)
+            for batch in parquet.iter_batches(batch_size=512, columns=["text"]):
+                for text in batch.column("text").to_pylist():
+                    if not text:
+                        continue
+                    if len(text) > max_doc_chars:
+                        text = text[:max_doc_chars]
+                    out_f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+                    docs_written += 1
+                    if docs_written % 5000 == 0:
+                        out_f.flush()
+                        print(f"  {docs_written}/{min_docs} docs", flush=True)
+                    if docs_written >= min_docs:
+                        break
+                if docs_written >= min_docs:
+                    break
+            if docs_written >= min_docs:
                 break
 
-    if total_chars < min_chars:
-        _write_raw_progress(progress_path, total_chars, stream_row + 1)
+    if docs_written < min_docs:
         raise RuntimeError(
-            f"Only cached {total_chars} chars (need {min_chars}). "
-            "Try a different dataset/config or lower --num-sequences."
+            f"Only cached {docs_written}/{min_docs} docs from {len(parquet_files)} parquet shards. "
+            "Increase shard count or lower --num-sequences."
         )
-    progress_path.unlink(missing_ok=True)
-    print(f"Raw dataset OK: {out_path} ({total_chars / 1e9:.2f} GB chars)")
+    print(f"Raw dataset OK: {out_path} ({docs_written} docs, {out_path.stat().st_size / 1e9:.2f} GB)")
 
 
 def _progress_path(out_path: Path) -> Path:
@@ -409,7 +433,6 @@ def tokenize_dataset(
                 written += 1
                 if written % 1000 == 0:
                     out_f.flush()
-                    os.fsync(out_f.fileno())
                     _write_progress(progress_path, written, row_idx + 1)
                     print(f"  {written}/{num_sequences} sequences", flush=True)
             if written >= num_sequences:
@@ -495,17 +518,14 @@ def main() -> None:
         sys.exit(1)
 
     if args.cache_raw and not args.skip_raw_cache:
-        raw_progress = _raw_progress_path(raw_path)
-        resume_raw = raw_progress.is_file() and _read_raw_progress(raw_progress)[0] < _min_raw_chars(
-            args.num_sequences, args.seq_length
-        )
         cache_raw_dataset(
             raw_path,
             args.dataset,
             args.dataset_config,
             args.num_sequences,
             args.seq_length,
-            resume=resume_raw or args.resume_data,
+            project_root,
+            force=args.force_raw_recache,
         )
 
     progress_path = _progress_path(data_path)
