@@ -82,7 +82,7 @@ python scripts/train_llama1b_ssa.py \
   --seq-length 4096 \
   --batch-size 1 \
   --grad-accum 16 \
-  --max-steps 10000 \
+  --max-steps 5000 \
   --lr 3e-4 \
   --local-model-dir "$MODEL_DIR" \
   --local-data-bin "$DATA_BIN" \
