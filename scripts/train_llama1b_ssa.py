@@ -39,7 +39,23 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--from-scratch", action="store_true")
     p.add_argument("--smoke-test", action="store_true", help="Run 5 steps on random data")
+    p.add_argument(
+        "--checkpoint-fa",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Gradient-checkpoint the FA stream (saves VRAM, slower)",
+    )
+    p.add_argument("--socket-train-l", type=int, default=None, help="SOCKET LSH tables during training")
     return p.parse_args()
+
+
+def setup_cuda_perf() -> None:
+    if not torch.cuda.is_available():
+        return
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
 
 
 class RandomTokenDataset(IterableDataset):
@@ -60,11 +76,24 @@ class LocalMemmapDataset(IterableDataset):
         import numpy as np
 
         self.seq_length = seq_length
-        self.data = np.memmap(bin_path, dtype=np.int32, mode="r")
-        if self.data.size % (seq_length + 1) != 0:
+        flat = np.memmap(bin_path, dtype=np.int32, mode="r")
+        row_width = self._infer_row_width(flat.size, seq_length)
+        if flat.size % row_width != 0:
             raise ValueError(f"Invalid bin file shape for seq_length={seq_length}: {bin_path}")
-        self.num_rows = self.data.size // (seq_length + 1)
-        self.data = self.data.reshape(self.num_rows, seq_length + 1)
+        self.stored_seq = row_width - 1
+        self.num_rows = flat.size // row_width
+        self.data = flat.reshape(self.num_rows, row_width)
+
+    @staticmethod
+    def _infer_row_width(total_size: int, seq_length: int) -> int:
+        preferred = seq_length + 1
+        if total_size % preferred == 0:
+            return preferred
+        for stored in (4096, 2048, 8192, 1024, 512):
+            width = stored + 1
+            if total_size % width == 0:
+                return width
+        raise ValueError(f"Cannot infer row width from file size {total_size}")
 
     def __iter__(self):
         import numpy as np
@@ -72,9 +101,10 @@ class LocalMemmapDataset(IterableDataset):
         while True:
             perm = np.random.permutation(self.num_rows)
             for idx in perm:
-                # int32 memmap -> int64 for CUDA embed / cross_entropy; labels match
-                # input_ids so the model's internal shift aligns with next-token targets.
-                input_ids = torch.from_numpy(self.data[idx, :-1].copy()).long()
+                row = self.data[idx]
+                if self.stored_seq > self.seq_length:
+                    row = row[: self.seq_length + 1]
+                input_ids = torch.from_numpy(np.asarray(row[:-1], dtype=np.int64))
                 yield {"input_ids": input_ids, "labels": input_ids.clone()}
 
 
@@ -132,8 +162,14 @@ def main() -> None:
         base_model=args.base_model,
     )
     cfg.ssa = SSAConfig(sparse_backend=args.sparse_backend)
+    if args.checkpoint_fa is not None:
+        cfg.ssa.checkpoint_fa = args.checkpoint_fa
+    if args.socket_train_l is not None:
+        cfg.socket.train_l = args.socket_train_l
     if args.output_dir:
         cfg.output_dir = args.output_dir
+
+    setup_cuda_perf()
 
     if args.smoke_test:
         # Safe defaults for dual-stream SSA smoke test on 1× H100
@@ -167,7 +203,11 @@ def main() -> None:
         model = model.to(dtype=dtype)
 
     print(f"Parameters: {model.num_parameters() / 1e9:.2f}B")
-    print(f"Backend: {cfg.ssa.sparse_backend} | seq={cfg.seq_length} | batch={cfg.per_device_batch_size}")
+    print(
+        f"Backend: {cfg.ssa.sparse_backend} | seq={cfg.seq_length} | batch={cfg.per_device_batch_size} "
+        f"| grad_accum={cfg.gradient_accumulation_steps} | checkpoint_fa={cfg.ssa.checkpoint_fa} "
+        f"| socket_L={cfg.socket.train_l}"
+    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.learning_rate)
 
@@ -192,6 +232,8 @@ def main() -> None:
     if local_data is not None:
         print(f"Using offline data: {local_data}")
         dataset = LocalMemmapDataset(local_data, cfg.seq_length)
+        if dataset.stored_seq != cfg.seq_length:
+            print(f"  Slicing stored seq={dataset.stored_seq} -> train seq={cfg.seq_length}")
     elif offline:
         raise FileNotFoundError(
             f"Offline mode but data not found at {project_root / f'cache/data/train_{cfg.seq_length}.bin'}. "

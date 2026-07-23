@@ -17,7 +17,7 @@
 #
 # Prerequisite (login node, once):
 #   bash scripts/prefetch_offline_assets.sh
-# That caches the model + raw FineWeb text. This job tokenizes offline, then trains.
+# That caches the model + parquet shards. This job builds JSONL, tokenizes, trains.
 #
 # Request H100 explicitly (optional — omit to accept any GPU):
 #   #SBATCH --constraint=h100
@@ -61,29 +61,47 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=8
 
-SEQ_LENGTH=4096
+SEQ_LENGTH=2048
 NUM_SEQUENCES=85000
 MODEL_DIR="$PROJECT_ROOT/cache/models/Llama-3.2-1B"
+PARQUET_DIR="$PROJECT_ROOT/cache/datasets/fineweb_parquet"
 RAW_DATA="$PROJECT_ROOT/cache/datasets/fineweb_raw.jsonl"
-DATA_BIN="$PROJECT_ROOT/cache/data/train_${SEQ_LENGTH}.bin"
+# Reuse 4096 tokenized cache; training script slices to SEQ_LENGTH.
+DATA_BIN="$PROJECT_ROOT/cache/data/train_4096.bin"
+MAX_STEPS=2000
 
 if [[ ! -d "$MODEL_DIR" ]]; then
     echo "ERROR: Model not prefetched: $MODEL_DIR"
     echo "Run on login node: bash scripts/prefetch_offline_assets.sh"
     exit 1
 fi
-if [[ ! -f "$RAW_DATA" ]]; then
-    echo "ERROR: Raw dataset not cached: $RAW_DATA"
+if [[ -z "$(find "$PARQUET_DIR" -name '*.parquet' -print -quit 2>/dev/null)" ]]; then
+    echo "ERROR: Parquet shards not cached: $PARQUET_DIR"
     echo "Run on login node: bash scripts/prefetch_offline_assets.sh"
     exit 1
 fi
-echo "Offline assets OK: model + raw text"
+echo "Offline assets OK: model + parquet shards"
 
 # Activate env via shared helpers (handles empty $HOME on compute nodes)
 # shellcheck source=/dev/null
 source "$PROJECT_ROOT/scripts/activate_env.sh"
 
-mkdir -p logs outputs cache/data
+mkdir -p logs outputs cache/data cache/datasets
+
+if [[ ! -f "$RAW_DATA" ]]; then
+    echo "Building JSONL offline on compute node -> $RAW_DATA"
+    python scripts/prefetch_offline_assets.py \
+      --project-root "$PROJECT_ROOT" \
+      --skip-model \
+      --skip-raw-cache \
+      --build-jsonl-only \
+      --offline \
+      --seq-length "$SEQ_LENGTH" \
+      --num-sequences "$NUM_SEQUENCES"
+    echo "JSONL build complete."
+else
+    echo "Using cached raw JSONL: $RAW_DATA"
+fi
 
 if [[ ! -f "$DATA_BIN" ]]; then
     echo "Tokenizing offline on compute node -> $DATA_BIN"
@@ -103,10 +121,12 @@ fi
 python scripts/train_llama1b_ssa.py \
   --sparse-backend socket \
   --seq-length "$SEQ_LENGTH" \
-  --batch-size 1 \
-  --grad-accum 16 \
-  --max-steps 5000 \
+  --batch-size 2 \
+  --grad-accum 8 \
+  --max-steps "$MAX_STEPS" \
   --lr 3e-4 \
+  --no-checkpoint-fa \
+  --socket-train-l 8 \
   --local-model-dir "$MODEL_DIR" \
   --local-data-bin "$DATA_BIN" \
   --output-dir "$PROJECT_ROOT/outputs/llama1b-ssa-socket-${SLURM_JOB_ID}"
