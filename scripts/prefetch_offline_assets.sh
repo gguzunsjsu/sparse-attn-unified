@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Run on the LOGIN NODE (has internet) before submitting GPU jobs.
 #
-# Downloads the model + caches raw dataset text locally. Tokenization runs
-# offline inside the SLURM training job (128 GB compute node).
+# Downloads the model + FineWeb parquet shards. JSONL build and tokenization
+# run offline on the GPU compute node (128 GB RAM) inside the SLURM job.
 #
 # Usage:
 #   cd /scratch/rnd-guzun/sparse-attn-unified
@@ -42,11 +42,11 @@ python scripts/prefetch_offline_assets.py \
   --seq-length 4096 \
   --num-sequences 85000 \
   --skip-data \
-  --cache-raw \
+  --parquet-only \
   "$@"
 
 echo ""
-echo "Done. Submit training (tokenizes offline on the GPU node if needed):"
+echo "Done. Submit training (builds JSONL + tokenizes offline on GPU node):"
 echo "  cd $PROJECT_ROOT"
 echo "  mkdir -p logs"
 echo "  sbatch scripts/slurm/train_llama1b_h100.slurm"

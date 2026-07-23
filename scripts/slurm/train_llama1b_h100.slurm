@@ -52,6 +52,7 @@ load_cuda_module
 # Do NOT module load python3 — use micromamba/conda env only.
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
+export PYTHONPATH="$PROJECT_ROOT"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$PROJECT_ROOT/cache/huggingface/datasets}"
 export HF_HUB_OFFLINE=1
@@ -62,12 +63,13 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=8
 
 SEQ_LENGTH=2048
+TOKENIZE_SEQ=4096
 NUM_SEQUENCES=85000
 MODEL_DIR="$PROJECT_ROOT/cache/models/Llama-3.2-1B"
 PARQUET_DIR="$PROJECT_ROOT/cache/datasets/fineweb_parquet"
 RAW_DATA="$PROJECT_ROOT/cache/datasets/fineweb_raw.jsonl"
-# Reuse 4096 tokenized cache; training script slices to SEQ_LENGTH.
-DATA_BIN="$PROJECT_ROOT/cache/data/train_4096.bin"
+# Tokenize at 4096 once; training slices to SEQ_LENGTH (2048).
+DATA_BIN="$PROJECT_ROOT/cache/data/train_${TOKENIZE_SEQ}.bin"
 MAX_STEPS=2000
 
 if [[ ! -d "$MODEL_DIR" ]]; then
@@ -104,19 +106,30 @@ else
 fi
 
 if [[ ! -f "$DATA_BIN" ]]; then
-    echo "Tokenizing offline on compute node -> $DATA_BIN"
+    echo "Tokenizing offline on compute node -> $DATA_BIN (seq=${TOKENIZE_SEQ})"
     python scripts/prefetch_offline_assets.py \
       --project-root "$PROJECT_ROOT" \
       --skip-model \
       --skip-raw-cache \
       --tokenize-only \
       --offline \
-      --seq-length "$SEQ_LENGTH" \
-      --num-sequences "$NUM_SEQUENCES"
+      --seq-length "$TOKENIZE_SEQ" \
+      --num-sequences "$NUM_SEQUENCES" \
+      --data-bin "$DATA_BIN"
     echo "Tokenization complete."
 else
     echo "Using cached tokenized data: $DATA_BIN"
+    python scripts/prefetch_offline_assets.py \
+      --project-root "$PROJECT_ROOT" \
+      --validate-only \
+      --offline \
+      --seq-length "$TOKENIZE_SEQ" \
+      --data-bin "$DATA_BIN"
 fi
+
+python -m pip install -e "$PROJECT_ROOT" --no-deps -q
+echo "sparse_attn import path:"
+python -c "import sparse_attn.models.llama_ssa as m; print(m.__file__)"
 
 python scripts/train_llama1b_ssa.py \
   --sparse-backend socket \

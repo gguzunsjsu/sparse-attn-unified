@@ -25,6 +25,70 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 import numpy as np
 
 
+def infer_row_width(total_size: int, seq_length: int) -> int:
+    """Infer tokens-per-row from flat memmap size."""
+    preferred = seq_length + 1
+    if total_size % preferred == 0:
+        return preferred
+    for stored in (4096, 2048, 8192, 1024, 512):
+        width = stored + 1
+        if total_size % width == 0:
+            return width
+    raise ValueError(f"Cannot infer row width from file size {total_size}")
+
+
+def validate_data_bin(
+    bin_path: Path,
+    *,
+    seq_length: int | None = None,
+    num_samples: int = 8,
+    vocab_size: int = 128256,
+) -> tuple[int, int]:
+    """
+    Sample rows from a tokenized .bin and fail fast if data looks corrupt.
+
+    Returns (min_token_id, max_token_id) over sampled rows.
+    """
+    flat = np.memmap(bin_path, dtype=np.int32, mode="r")
+    if flat.size == 0:
+        raise RuntimeError(f"Empty data bin: {bin_path}")
+
+    row_width = infer_row_width(flat.size, seq_length or 4096)
+    stored_seq = row_width - 1
+    num_rows = flat.size // row_width
+    rows = flat.reshape(num_rows, row_width)
+
+    rng = np.random.default_rng(0)
+    idxs = rng.choice(num_rows, size=min(num_samples, num_rows), replace=False)
+    sample = np.asarray(rows[idxs], dtype=np.int64)
+    mn = int(sample.min())
+    mx = int(sample.max())
+    zero_frac = float((sample == 0).mean())
+
+    if mx == 0:
+        raise RuntimeError(
+            f"Corrupt data bin (all token id 0): {bin_path}\n"
+            f"  stored_seq={stored_seq}, num_rows={num_rows}\n"
+            "Delete the .bin (and .progress if any) and re-tokenize."
+        )
+    if zero_frac > 0.9:
+        raise RuntimeError(
+            f"Corrupt data bin (>90% token id 0, zero_frac={zero_frac:.3f}): {bin_path}\n"
+            "Delete the .bin and re-tokenize."
+        )
+    if mx >= vocab_size or mn < 0:
+        raise RuntimeError(
+            f"Invalid token ids in {bin_path}: range=[{mn}, {mx}], vocab_size={vocab_size}"
+        )
+
+    print(
+        f"Data bin OK: {bin_path} stored_seq={stored_seq} rows={num_rows} "
+        f"sample_range=[{mn}, {mx}] zero_frac={zero_frac:.3f}",
+        flush=True,
+    )
+    return mn, mx
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Prefetch HuggingFace assets for offline HPC training")
     p.add_argument("--model", default="meta-llama/Llama-3.2-1B")
@@ -48,7 +112,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--cache-raw",
         action="store_true",
-        help="Stream dataset text to local JSONL for offline tokenization on compute nodes",
+        help="Download parquet shards and build JSONL (login node; use --parquet-only instead)",
+    )
+    p.add_argument(
+        "--parquet-only",
+        action="store_true",
+        help="Login node: download parquet shards only (needs internet)",
+    )
+    p.add_argument(
+        "--build-jsonl-only",
+        action="store_true",
+        help="Build JSONL from local parquet shards (offline; used by SLURM)",
     )
     p.add_argument("--skip-raw-cache", action="store_true", help="Skip raw dataset caching")
     p.add_argument(
@@ -70,6 +144,17 @@ def parse_args() -> argparse.Namespace:
         "--resume-data",
         action="store_true",
         help="Resume tokenization from .progress sidecar (auto-detected if present)",
+    )
+    p.add_argument(
+        "--data-bin",
+        type=Path,
+        default=None,
+        help="Explicit tokenized .bin path (tokenize output or --validate-only target)",
+    )
+    p.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate an existing tokenized .bin and exit",
     )
     return p.parse_args()
 
@@ -258,10 +343,8 @@ def download_parquet_shards(
     return paths
 
 
-def cache_raw_dataset(
+def build_jsonl_from_parquet(
     out_path: Path,
-    dataset_name: str,
-    dataset_config: str,
     num_sequences: int,
     seq_length: int,
     project_root: Path,
@@ -273,6 +356,12 @@ def cache_raw_dataset(
     min_docs = _min_raw_docs(num_sequences)
     max_doc_chars = (seq_length + 1) * 12
     shard_dir = parquet_shard_dir(project_root)
+    parquet_files = sorted(shard_dir.rglob("*.parquet"))
+    if not parquet_files:
+        raise FileNotFoundError(
+            f"No parquet shards in {shard_dir}. "
+            "Run on login node: bash scripts/prefetch_offline_assets.sh"
+        )
 
     if force:
         if out_path.exists():
@@ -281,7 +370,7 @@ def cache_raw_dataset(
 
     docs_written = _count_jsonl_docs(out_path)
     if docs_written >= min_docs:
-        print(f"Raw dataset already cached: {out_path} ({docs_written} docs)")
+        print(f"Raw JSONL already built: {out_path} ({docs_written} docs)")
         _raw_progress_path(out_path).unlink(missing_ok=True)
         return
 
@@ -290,9 +379,10 @@ def cache_raw_dataset(
         out_path.unlink()
         docs_written = 0
 
-    parquet_files = download_parquet_shards(dataset_name, shard_dir, num_shards=6)
-    print(f"Building JSONL from local parquet -> {out_path} (target {min_docs} docs)")
-
+    print(
+        f"Building JSONL from {len(parquet_files)} local parquet shards "
+        f"-> {out_path} (target {min_docs} docs)"
+    )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as out_f:
         for pq_path in parquet_files:
@@ -318,9 +408,27 @@ def cache_raw_dataset(
     if docs_written < min_docs:
         raise RuntimeError(
             f"Only cached {docs_written}/{min_docs} docs from {len(parquet_files)} parquet shards. "
-            "Increase shard count or lower --num-sequences."
+            "Download more shards on the login node or lower --num-sequences."
         )
-    print(f"Raw dataset OK: {out_path} ({docs_written} docs, {out_path.stat().st_size / 1e9:.2f} GB)")
+    print(f"Raw JSONL OK: {out_path} ({docs_written} docs, {out_path.stat().st_size / 1e9:.2f} GB)")
+
+
+def cache_raw_dataset(
+    out_path: Path,
+    dataset_name: str,
+    dataset_config: str,
+    num_sequences: int,
+    seq_length: int,
+    project_root: Path,
+    *,
+    force: bool = False,
+    parquet_only: bool = False,
+) -> None:
+    download_parquet_shards(dataset_name, parquet_shard_dir(project_root), num_shards=6)
+    if parquet_only:
+        print("Parquet shards ready. JSONL build will run offline in the SLURM job.")
+        return
+    build_jsonl_from_parquet(out_path, num_sequences, seq_length, project_root, force=force)
 
 
 def _progress_path(out_path: Path) -> Path:
@@ -446,6 +554,7 @@ def tokenize_dataset(
         )
     progress_path.unlink(missing_ok=True)
     print(f"Dataset OK: {out_path} ({written} sequences, {written * row_bytes / 1e9:.2f} GB)")
+    validate_data_bin(out_path, seq_length=seq_length)
 
 
 def write_manifest(
@@ -472,7 +581,7 @@ def main() -> None:
     args = parse_args()
     project_root = args.project_root
     model_dir = project_root / "cache" / "models" / "Llama-3.2-1B"
-    data_path = project_root / "cache" / "data" / f"train_{args.seq_length}.bin"
+    data_path = args.data_bin or (project_root / "cache" / "data" / f"train_{args.seq_length}.bin")
     raw_path = raw_dataset_path(project_root)
 
     offline = (
@@ -480,6 +589,13 @@ def main() -> None:
         or os.environ.get("HF_HUB_OFFLINE", "0") == "1"
         or os.environ.get("HF_DATASETS_OFFLINE", "0") == "1"
     )
+
+    if args.validate_only:
+        if not data_path.is_file():
+            print(f"ERROR: Data bin not found: {data_path}", file=sys.stderr)
+            sys.exit(1)
+        validate_data_bin(data_path, seq_length=args.seq_length)
+        return
 
     if args.tokenize_only:
         if not model_dir.is_dir():
@@ -507,6 +623,18 @@ def main() -> None:
         print("\nTokenization complete.")
         return
 
+    if args.build_jsonl_only:
+        build_jsonl_from_parquet(
+            raw_path,
+            args.num_sequences,
+            args.seq_length,
+            project_root,
+            force=args.force_raw_recache,
+        )
+        write_manifest(project_root, model_dir, data_path, raw_path, args)
+        print("\nJSONL build complete.")
+        return
+
     if not args.skip_model:
         verify_hf_auth(args.model)
         download_model(args.model, model_dir, force=args.force_model_redownload)
@@ -517,7 +645,7 @@ def main() -> None:
         print(f"ERROR: --skip-model but {model_dir} not found", file=sys.stderr)
         sys.exit(1)
 
-    if args.cache_raw and not args.skip_raw_cache:
+    if (args.cache_raw or args.parquet_only) and not args.skip_raw_cache:
         cache_raw_dataset(
             raw_path,
             args.dataset,
@@ -526,6 +654,7 @@ def main() -> None:
             args.seq_length,
             project_root,
             force=args.force_raw_recache,
+            parquet_only=args.parquet_only,
         )
 
     progress_path = _progress_path(data_path)
@@ -547,7 +676,7 @@ def main() -> None:
 
     write_manifest(project_root, model_dir, data_path, raw_path, args)
     if args.skip_data:
-        print("\nPrefetch complete. Tokenization will run offline in the SLURM training job.")
+        print("\nPrefetch complete. JSONL build + tokenization run offline in the SLURM job.")
     else:
         print("\nPrefetch complete. GPU jobs can run with HF_HUB_OFFLINE=1.")
 

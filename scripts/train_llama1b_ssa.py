@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import sys
 from pathlib import Path
 
 import torch
@@ -13,7 +14,13 @@ from torch.utils.data import IterableDataset, DataLoader
 from tqdm import tqdm
 
 from sparse_attn.config import HPCConfig, SSAConfig
+from sparse_attn.models import llama_ssa
 from sparse_attn.models.llama_ssa import LlamaSSAModel
+
+
+def _log_both(msg: str) -> None:
+    print(msg, flush=True)
+    print(msg, flush=True, file=sys.stderr)
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,6 +83,7 @@ class LocalMemmapDataset(IterableDataset):
     def __init__(self, bin_path: Path, seq_length: int):
         import numpy as np
 
+        self.bin_path = bin_path
         self.seq_length = seq_length
         flat = np.memmap(bin_path, dtype=np.int32, mode="r")
         row_width = self._infer_row_width(flat.size, seq_length)
@@ -84,6 +92,23 @@ class LocalMemmapDataset(IterableDataset):
         self.stored_seq = row_width - 1
         self.num_rows = flat.size // row_width
         self.data = flat.reshape(self.num_rows, row_width)
+        self._sanity_check_rows()
+
+    def _sanity_check_rows(self) -> None:
+        import numpy as np
+
+        idxs = np.random.default_rng(0).choice(
+            self.num_rows, size=min(8, self.num_rows), replace=False
+        )
+        sample = np.asarray(self.data[idxs], dtype=np.int64)
+        mx = int(sample.max())
+        zero_frac = float((sample == 0).mean())
+        if mx == 0 or zero_frac > 0.9:
+            raise RuntimeError(
+                f"Corrupt training data in {self.bin_path}: "
+                f"token_range=[{int(sample.min())}, {mx}] zero_frac={zero_frac:.3f}. "
+                f"Delete {self.bin_path} and re-tokenize."
+            )
 
     @staticmethod
     def _infer_row_width(total_size: int, seq_length: int) -> int:
@@ -153,6 +178,8 @@ def resolve_offline_paths(project_root: Path, args: argparse.Namespace) -> tuple
 def main() -> None:
     args = parse_args()
     project_root = Path(__file__).resolve().parent.parent
+    _log_both(f"sparse-attn-unified root: {project_root}")
+    _log_both(f"sparse_attn.llama_ssa: {llama_ssa.__file__}")
     offline = os.environ.get("HF_HUB_OFFLINE", "0") == "1" or os.environ.get("TRANSFORMERS_OFFLINE", "0") == "1"
     local_model, local_data = resolve_offline_paths(project_root, args)
     cfg = HPCConfig(
@@ -261,21 +288,44 @@ def main() -> None:
 
     # Sanity-check one batch before training (printed to .out, not tqdm).
     first_batch = next(iter(loader))
-    first_ids = first_batch["input_ids"].to(device)
-    first_labels = first_batch["labels"].to(device)
-    print(
+    first_ids = first_batch["input_ids"]
+    first_labels = first_batch["labels"]
+    zero_frac = float((first_ids == 0).float().mean())
+    _log_both(
         f"Data check: shape={tuple(first_ids.shape)} "
-        f"token_range=[{int(first_ids.min())}, {int(first_ids.max())}]",
-        flush=True,
+        f"token_range=[{int(first_ids.min())}, {int(first_ids.max())}] "
+        f"zero_frac={zero_frac:.3f}"
     )
+    if int(first_ids.max()) == 0 or zero_frac > 0.9:
+        raise RuntimeError(
+            f"Training data looks corrupt (token_range=[{int(first_ids.min())}, "
+            f"{int(first_ids.max())}], zero_frac={zero_frac:.3f}). "
+            f"Delete {local_data} and re-tokenize."
+        )
+    first_ids = first_ids.to(device)
+    first_labels = first_labels.to(device)
     model.eval()
     with torch.no_grad():
         probe = model(first_ids, first_labels, training=False, inference_mode="full")
-    print(
-        f"Baseline LM loss (full attn, no grad): {probe['lm_loss'].float().item():.4f}",
-        flush=True,
-    )
+    baseline_lm = probe["lm_loss"].float().item()
+    _log_both(f"Baseline LM loss (full attn, no grad): {baseline_lm:.4f}")
+    if not math.isfinite(baseline_lm) or baseline_lm < 0.5 or baseline_lm > 25.0:
+        raise RuntimeError(
+            f"Suspicious baseline LM loss ({baseline_lm:.4f}). "
+            "Run: pip install -e .  then resubmit (stale sparse_attn install)."
+        )
     model.train()
+    train_probe = model(first_ids, first_labels, training=True, global_step=0)
+    train_lm = train_probe["lm_loss"].detach().float().item()
+    train_align = train_probe["align_loss"].detach().float().item()
+    _log_both(
+        f"Train-mode probe (dual-stream, step 0): lm={train_lm:.4f} align={train_align:.4f}"
+    )
+    if not math.isfinite(train_lm) or train_lm <= 0.0:
+        raise RuntimeError(
+            f"Train-mode LM loss is invalid ({train_lm:.4f}) on first batch. "
+            f"sparse_attn from {llama_ssa.__file__}"
+        )
 
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -290,9 +340,9 @@ def main() -> None:
             f"step {step_num}: loss={stats['loss']:.4f} "
             f"lm={stats['lm']:.4f} align={stats['align']:.4f}"
         )
-        print(msg, flush=True)
-        if not math.isfinite(stats["loss"]):
-            raise RuntimeError(f"Non-finite loss at step {step_num}: {msg}")
+        _log_both(msg)
+        if not math.isfinite(stats["loss"]) or stats["lm"] <= 0.0:
+            raise RuntimeError(f"Invalid training loss at step {step_num}: {msg}")
 
     while step < cfg.max_steps:
         for batch in loader:

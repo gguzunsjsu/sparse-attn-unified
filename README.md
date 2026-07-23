@@ -110,7 +110,7 @@ hf auth whoami
 
 ### 3b. Prefetch assets for offline GPU nodes (required)
 
-**GPU nodes have no internet.** On the **login node**, cache the model and download a few FineWeb parquet shards (tokenization runs offline inside the SLURM job):
+**GPU nodes have no internet.** On the **login node**, cache the model and download FineWeb parquet shards (needs internet). JSONL build and tokenization run offline on the **GPU compute node** inside the SLURM job:
 
 ```bash
 cd /scratch/rnd-guzun/sparse-attn-unified
@@ -124,16 +124,17 @@ This creates (under your project on scratch):
 | Path | Contents |
 |------|----------|
 | `cache/models/Llama-3.2-1B/` | Full model + tokenizer (~2.5 GB) |
-| `cache/datasets/fineweb_parquet/` | ~6 local parquet shards (downloaded once) |
-| `cache/datasets/fineweb_raw.jsonl` | ~47k truncated docs for offline tokenization |
+| `cache/datasets/fineweb_parquet/` | ~6 parquet shards (login node download) |
+| `cache/datasets/fineweb_raw.jsonl` | Built offline on GPU node (~47k docs) |
+| `cache/data/train_4096.bin` | Built offline on GPU node (~1.4 GB) |
 
-The SLURM training job tokenizes this into `cache/data/train_4096.bin` (~1.4 GB, 85k sequences) on the compute node, then trains. Re-runs skip tokenization if the `.bin` already exists.
+The SLURM job builds JSONL (if needed), tokenizes, then trains. Re-runs skip steps when outputs already exist.
 
 Verify after prefetch:
 
 ```bash
 ls -lh cache/models/Llama-3.2-1B/config.json
-ls -lh cache/datasets/fineweb_raw.jsonl
+ls -lh cache/datasets/fineweb_parquet/*.parquet 2>/dev/null | head
 ```
 
 If you still get `command not found`, check you're in the right env:
