@@ -124,7 +124,7 @@ This creates (under your project on scratch):
 | Path | Contents |
 |------|----------|
 | `cache/models/Llama-3.2-1B/` | Full model + tokenizer (~2.5 GB) |
-| `cache/datasets/fineweb_raw.jsonl` | Raw text for offline tokenization (~1.7 GB) |
+| `cache/datasets/fineweb_raw.jsonl` | Raw text for offline tokenization (~0.7–1 GB) |
 
 The SLURM training job tokenizes this into `cache/data/train_4096.bin` (~1.4 GB, 85k sequences) on the compute node, then trains. Re-runs skip tokenization if the `.bin` already exists.
 

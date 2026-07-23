@@ -209,8 +209,13 @@ def _write_raw_progress(progress_path: Path, chars: int, row: int) -> None:
 
 
 def _min_raw_chars(num_sequences: int, seq_length: int) -> int:
-    # ~4 chars/token; 20% buffer for document boundaries and truncation waste.
-    return int(num_sequences * (seq_length + 1) * 4 * 1.2)
+    # Tokenization truncates each doc; ~2 chars/token is enough raw text.
+    max_doc_chars = (seq_length + 1) * 12
+    min_docs = max(num_sequences // 2, 10_000)
+    return min(
+        int(num_sequences * (seq_length + 1) * 2),
+        min_docs * max_doc_chars,
+    )
 
 
 def cache_raw_dataset(
@@ -222,45 +227,70 @@ def cache_raw_dataset(
     *,
     resume: bool = False,
 ) -> None:
+    import time
+
     from datasets import load_dataset
 
     min_chars = _min_raw_chars(num_sequences, seq_length)
+    max_doc_chars = (seq_length + 1) * 12
     progress_path = _raw_progress_path(out_path)
     start_chars, start_row = (0, 0)
     if resume and progress_path.is_file():
         start_chars, start_row = _read_raw_progress(progress_path)
         if start_chars >= min_chars:
-            print(f"Raw dataset already cached: {out_path} ({start_chars} chars)")
+            print(f"Raw dataset already cached: {out_path} ({start_chars / 1e9:.2f} GB chars)")
+            progress_path.unlink(missing_ok=True)
             return
         if start_chars > 0:
-            print(f"Resuming raw cache from row {start_row} ({start_chars} chars)")
+            print(
+                f"Resuming raw cache from stream row {start_row} "
+                f"({start_chars / 1e9:.2f} / {min_chars / 1e9:.2f} GB chars)"
+            )
 
     print(f"Caching raw text -> {out_path} (target >= {min_chars / 1e9:.2f} GB chars)")
     ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
+    if start_row > 0:
+        print(f"Skipping to stream row {start_row} (no re-download of earlier rows)...")
+        ds = ds.skip(start_row)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_mode = "a" if start_chars > 0 and out_path.is_file() else "w"
     total_chars = start_chars
-    row_idx = start_row - 1
+    stream_row = start_row
+    t0 = time.monotonic()
+    last_report = t0
     with open(out_path, out_mode, encoding="utf-8") as out_f:
-        for row_idx, row in enumerate(ds):
-            if row_idx < start_row:
-                continue
+        for offset, row in enumerate(ds):
+            stream_row = start_row + offset
             text = row["text"]
             if not text:
                 continue
+            if len(text) > max_doc_chars:
+                text = text[:max_doc_chars]
             out_f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
             total_chars += len(text)
-            if row_idx % 500 == 0:
+            now = time.monotonic()
+            if offset % 100 == 0 or total_chars >= min_chars or now - last_report >= 30:
                 out_f.flush()
                 os.fsync(out_f.fileno())
-                _write_raw_progress(progress_path, total_chars, row_idx + 1)
-                print(f"  row {row_idx + 1}: {total_chars / 1e9:.2f} GB chars", flush=True)
+                _write_raw_progress(progress_path, total_chars, stream_row + 1)
+                elapsed = now - t0
+                rate = (total_chars - start_chars) / max(elapsed, 1e-6)
+                remaining = max(0, min_chars - total_chars)
+                eta_s = remaining / rate if rate > 0 else 0
+                print(
+                    f"  stream row {stream_row + 1}: "
+                    f"{total_chars / 1e9:.2f}/{min_chars / 1e9:.2f} GB chars "
+                    f"({rate / 1e6:.1f} MB/s"
+                    f"{f', ~{eta_s / 60:.0f} min left' if eta_s > 0 else ''})",
+                    flush=True,
+                )
+                last_report = now
             if total_chars >= min_chars:
                 break
 
     if total_chars < min_chars:
-        _write_raw_progress(progress_path, total_chars, row_idx + 1)
+        _write_raw_progress(progress_path, total_chars, stream_row + 1)
         raise RuntimeError(
             f"Only cached {total_chars} chars (need {min_chars}). "
             "Try a different dataset/config or lower --num-sequences."
