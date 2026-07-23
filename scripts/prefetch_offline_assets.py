@@ -6,16 +6,15 @@ login node before submitting SLURM jobs.
 
 Usage (login node):
   source scripts/activate_env.sh
+  huggingface-cli login
   python scripts/prefetch_offline_assets.py
-
-Optional:
-  python scripts/prefetch_offline_assets.py --num-sequences 170000 --seq-length 4096
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -30,15 +29,92 @@ def parse_args() -> argparse.Namespace:
         "--num-sequences",
         type=int,
         default=170_000,
-        help="Tokenized sequences to cache (10000 steps x grad_accum 16 = 160k minimum)",
+        help="Tokenized sequences (5000 steps x grad_accum 16 = 80k minimum)",
     )
-    p.add_argument(
-        "--dataset",
-        default="HuggingFaceFW/fineweb-edu",
-        help="HF dataset name for streaming tokenization",
-    )
+    p.add_argument("--dataset", default="HuggingFaceFW/fineweb-edu")
     p.add_argument("--dataset-config", default="sample-10BT")
+    p.add_argument("--skip-model", action="store_true", help="Skip model download (already cached)")
+    p.add_argument("--skip-data", action="store_true", help="Skip dataset tokenization")
     return p.parse_args()
+
+
+def _token_paths() -> list[Path]:
+    home = Path.home()
+    hf_home = Path(os.environ.get("HF_HOME", home / ".cache" / "huggingface"))
+    return [
+        hf_home / "token",
+        home / ".cache" / "huggingface" / "token",
+        home / ".huggingface" / "token",
+    ]
+
+
+def verify_hf_auth(model_id: str) -> None:
+    """Fail fast with actionable instructions if not authenticated for gated models."""
+    from huggingface_hub import HfApi
+    from huggingface_hub.utils import GatedRepoError
+
+    has_token = bool(os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
+    if not has_token:
+        has_token = any(p.is_file() and p.stat().st_size > 0 for p in _token_paths())
+
+    if not has_token:
+        print("ERROR: Not logged in to HuggingFace.", file=sys.stderr)
+        print(_auth_instructions(), file=sys.stderr)
+        sys.exit(1)
+
+    api = HfApi()
+    try:
+        user = api.whoami()
+        print(f"HuggingFace authenticated as: {user.get('name', user.get('fullname', 'unknown'))}")
+    except Exception as exc:
+        print(f"ERROR: HuggingFace auth check failed: {exc}", file=sys.stderr)
+        print(_auth_instructions(), file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        api.model_info(model_id)
+        print(f"Model access OK: {model_id}")
+    except GatedRepoError:
+        print(f"ERROR: No access to gated model {model_id}.", file=sys.stderr)
+        print(_gated_model_instructions(model_id), file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"WARN: Could not verify model access ({exc}); continuing...")
+
+
+def _auth_instructions() -> str:
+    return """
+Llama 3.2 1B requires HuggingFace authentication.
+
+1. Accept the license (browser, while on VPN if needed):
+   https://huggingface.co/meta-llama/Llama-3.2-1B
+
+2. Create a READ token:
+   https://huggingface.co/settings/tokens
+
+3. Login on the login node (pick ONE):
+
+   huggingface-cli login
+
+   OR
+
+   export HF_TOKEN=hf_xxxxxxxx
+   export HF_HOME=$HOME/.cache/huggingface
+
+4. Verify:
+   huggingface-cli whoami
+   bash scripts/prefetch_offline_assets.sh
+"""
+
+
+def _gated_model_instructions(model_id: str) -> str:
+    return f"""
+Your HF account is logged in but does NOT have access to {model_id}.
+
+1. Open https://huggingface.co/{model_id}
+2. Click "Agree and access repository" (Meta Llama license)
+3. Wait ~1 minute, then re-run prefetch.
+"""
 
 
 def download_model(model_id: str, local_dir: Path) -> None:
@@ -46,10 +122,11 @@ def download_model(model_id: str, local_dir: Path) -> None:
 
     print(f"Downloading model {model_id} -> {local_dir}")
     local_dir.mkdir(parents=True, exist_ok=True)
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     snapshot_download(
         repo_id=model_id,
         local_dir=str(local_dir),
-        local_dir_use_symlinks=False,
+        token=token,
     )
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -79,7 +156,6 @@ def tokenize_dataset(
     ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    # Shape [N, seq_length+1] — training script splits into input/labels
     memmap = np.memmap(
         out_path,
         dtype=np.int32,
@@ -130,18 +206,25 @@ def main() -> None:
     model_dir = project_root / "cache" / "models" / "Llama-3.2-1B"
     data_path = project_root / "cache" / "data" / f"train_{args.seq_length}.bin"
 
-    if not os.environ.get("HF_TOKEN") and not (Path.home() / ".cache" / "huggingface" / "token").exists():
-        print("NOTE: Llama 3.2 1B is gated. Run `huggingface-cli login` on the login node first.")
+    if not args.skip_model:
+        verify_hf_auth(args.model)
+        download_model(args.model, model_dir)
+    elif model_dir.is_dir():
+        print(f"Skipping model download; using {model_dir}")
+    else:
+        print(f"ERROR: --skip-model but {model_dir} not found", file=sys.stderr)
+        sys.exit(1)
 
-    download_model(args.model, model_dir)
-    tokenize_dataset(
-        model_dir,
-        data_path,
-        args.dataset,
-        args.dataset_config,
-        args.seq_length,
-        args.num_sequences,
-    )
+    if not args.skip_data:
+        tokenize_dataset(
+            model_dir,
+            data_path,
+            args.dataset,
+            args.dataset_config,
+            args.seq_length,
+            args.num_sequences,
+        )
+
     write_manifest(project_root, model_dir, data_path, args)
     print("\nPrefetch complete. GPU jobs can run with HF_HUB_OFFLINE=1.")
 

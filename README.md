@@ -66,6 +66,7 @@ bash scripts/setup_hpc_legacy.sh
 | `CUDA out of memory` during training | SSA runs FA + SA each layer | Use batch=1; ensure latest code (fixed sparse_attention memory bug) |
 | `ERROR: torch not installed in env 'ssa-h100'` | Env created but PyTorch install failed/skipped | `bash scripts/install_torch.sh` |
 | `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
+| `401 Unauthorized` / `GatedRepoError` on prefetch | Not logged in or license not accepted | Accept license at huggingface.co/meta-llama/Llama-3.2-1B, then `huggingface-cli login` |
 | `Network is unreachable` / HuggingFace download on GPU node | GPU nodes have no internet | Run `bash scripts/prefetch_offline_assets.sh` on **login node** first |
 | `module(s) are unknown: "cuda"` | SJSU uses versioned modules (`cuda/12.1`), not bare `cuda` | Run `module avail cuda`; then `CUDA_MODULE=cuda/X.Y sbatch ...` |
 | `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | `bash scripts/load_cuda.sh` or set `CUDA_MODULE=cuda/12.1` |
@@ -92,12 +93,20 @@ micromamba activate ssa-h100   # or: conda activate ssa-h100
 # Install CLI if missing
 python -m pip install huggingface_hub
 
-# Login (either form works)
+# 1. Accept Meta Llama license in browser (required once per HF account):
+#    https://huggingface.co/meta-llama/Llama-3.2-1B  → "Agree and access repository"
+
+# 2. Create a READ token: https://huggingface.co/settings/tokens
+
+# 3. Login on login node (pick ONE):
 huggingface-cli login
-# OR
-python -m huggingface_hub.cli.huggingface_cli login
+# OR paste token non-interactively:
+# export HF_TOKEN=hf_xxxxxxxx
 
 export HF_HOME=$HOME/.cache/huggingface
+
+# 4. Verify before prefetch:
+huggingface-cli whoami
 ```
 
 ### 3b. Prefetch assets for offline GPU nodes (required)
@@ -116,7 +125,7 @@ This creates (under your project on scratch):
 | Path | Contents |
 |------|----------|
 | `cache/models/Llama-3.2-1B/` | Full model + tokenizer (~2.5 GB) |
-| `cache/data/train_4096.bin` | 170k tokenized sequences (~2.8 GB) |
+| `cache/data/train_4096.bin` | 85k tokenized sequences (~1.4 GB, enough for 5k steps) |
 
 Prefetch takes **~30–90 min** on the login node depending on network. After it completes, SLURM jobs run fully offline (`HF_HUB_OFFLINE=1`).
 
