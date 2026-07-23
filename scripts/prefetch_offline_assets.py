@@ -198,6 +198,8 @@ def tokenize_dataset(
     *,
     resume: bool = False,
 ) -> None:
+    import array
+
     from datasets import load_dataset
     from transformers import AutoTokenizer
 
@@ -220,45 +222,54 @@ def tokenize_dataset(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     row_bytes = (seq_length + 1) * np.dtype(np.int32).itemsize
-    if start_written == 0 and out_path.exists():
-        out_path.unlink()
-    memmap = np.memmap(
-        out_path,
-        dtype=np.int32,
-        mode="w+" if start_written == 0 else "r+",
-        shape=(num_sequences, seq_length + 1),
-    )
+    if start_written == 0:
+        if out_path.exists():
+            out_path.unlink()
+        out_mode = "wb"
+    else:
+        expected_size = start_written * row_bytes
+        actual_size = out_path.stat().st_size if out_path.exists() else 0
+        if actual_size != expected_size:
+            raise RuntimeError(
+                f"Cannot resume: {out_path} is {actual_size} bytes, expected {expected_size}. "
+                "Remove the .bin and .progress files and restart."
+            )
+        out_mode = "ab"
 
-    # FineWeb pages can be multi-MB; tokenizing whole documents OOMs login nodes.
+    # Login nodes often cap virtual memory (ulimit -v). Do NOT np.memmap the full
+    # output up front — a 1.4GB map triggers SIGKILL even if RSS stays small.
+    chunk_buf = array.array("i", [0] * (seq_length + 1))
     max_chars = (seq_length + 1) * 12
     max_buffer_tokens = (seq_length + 1) * 8
 
     buffer: list[int] = []
     written = start_written
     row_idx = start_row - 1
-    for row_idx, row in enumerate(ds):
-        if row_idx < start_row:
-            continue
-        text = row["text"]
-        if len(text) > max_chars:
-            text = text[:max_chars]
-        ids = tokenizer(text, add_special_tokens=True)["input_ids"]
-        buffer.extend(ids)
-        if len(buffer) > max_buffer_tokens:
-            buffer = buffer[-max_buffer_tokens:]
-        while len(buffer) >= seq_length + 1 and written < num_sequences:
-            chunk = buffer[: seq_length + 1]
-            buffer = buffer[seq_length:]
-            memmap[written] = np.asarray(chunk, dtype=np.int32)
-            written += 1
-            if written % 1000 == 0:
-                memmap.flush()
-                _write_progress(progress_path, written, row_idx + 1)
-                print(f"  {written}/{num_sequences} sequences", flush=True)
-        if written >= num_sequences:
-            break
+    with open(out_path, out_mode) as out_f:
+        for row_idx, row in enumerate(ds):
+            if row_idx < start_row:
+                continue
+            text = row["text"]
+            if len(text) > max_chars:
+                text = text[:max_chars]
+            ids = tokenizer(text, add_special_tokens=True)["input_ids"]
+            buffer.extend(ids)
+            if len(buffer) > max_buffer_tokens:
+                buffer = buffer[-max_buffer_tokens:]
+            while len(buffer) >= seq_length + 1 and written < num_sequences:
+                for i, tok in enumerate(buffer[: seq_length + 1]):
+                    chunk_buf[i] = tok
+                del buffer[: seq_length + 1]
+                out_f.write(chunk_buf.tobytes())
+                written += 1
+                if written % 1000 == 0:
+                    out_f.flush()
+                    os.fsync(out_f.fileno())
+                    _write_progress(progress_path, written, row_idx + 1)
+                    print(f"  {written}/{num_sequences} sequences", flush=True)
+            if written >= num_sequences:
+                break
 
-    memmap.flush()
     if written < num_sequences:
         _write_progress(progress_path, written, row_idx + 1)
         raise RuntimeError(

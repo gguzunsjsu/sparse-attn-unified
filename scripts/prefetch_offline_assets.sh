@@ -41,6 +41,13 @@ python scripts/prefetch_offline_assets.py \
   "$@"
 
 echo ""
-echo "Done. Submit training with:"
-echo "  cd $PROJECT_ROOT"
-echo "  sbatch scripts/slurm/train_llama1b_h100.slurm"
+if [[ -f "$PROJECT_ROOT/cache/data/train_4096.bin" ]]; then
+  echo "Done. Submit training with:"
+  echo "  cd $PROJECT_ROOT"
+  echo "  sbatch scripts/slurm/train_llama1b_h100.slurm"
+else
+  echo "Tokenization did not finish (login node may have killed the process)."
+  echo "Model is likely cached; try the SLURM data job instead:"
+  echo "  mkdir -p logs"
+  echo "  sbatch scripts/slurm/prefetch_data.slurm"
+fi
