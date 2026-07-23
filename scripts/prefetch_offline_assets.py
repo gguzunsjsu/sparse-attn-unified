@@ -285,9 +285,23 @@ def parquet_shard_dir(project_root: Path) -> Path:
     return project_root / "cache" / "datasets" / "fineweb_parquet"
 
 
-def _min_raw_docs(num_sequences: int) -> int:
-    # Truncated docs usually yield 2+ training sequences after buffering.
+def _min_raw_docs(num_sequences: int, seq_length: int) -> int:
+    """Minimum JSONL docs when built with the same ``seq_length`` as tokenization.
+
+    Truncated docs usually yield 2+ training sequences after cross-doc buffering.
+    ``seq_length`` is accepted so callers document intent; the target is sized for
+    FineWeb with ~6 parquet shards (~47k docs).
+    """
+    _ = seq_length
     return num_sequences // 2 + 5_000
+
+
+def count_bin_rows(bin_path: Path, *, seq_length: int | None = None) -> int:
+    flat = np.memmap(bin_path, dtype=np.int32, mode="r")
+    if flat.size == 0:
+        return 0
+    row_width = infer_row_width(flat.size, seq_length or 4096)
+    return flat.size // row_width
 
 
 def _count_jsonl_docs(path: Path) -> int:
@@ -353,7 +367,7 @@ def build_jsonl_from_parquet(
 ) -> None:
     import pyarrow.parquet as pq
 
-    min_docs = _min_raw_docs(num_sequences)
+    min_docs = _min_raw_docs(num_sequences, seq_length)
     max_doc_chars = (seq_length + 1) * 12
     shard_dir = parquet_shard_dir(project_root)
     parquet_files = sorted(shard_dir.rglob("*.parquet"))
@@ -481,6 +495,16 @@ def tokenize_dataset(
     print(f"Tokenizing {num_sequences} sequences (len={seq_length}) -> {out_path}")
     if local_raw_path is not None:
         print(f"Reading offline raw text: {local_raw_path}")
+        doc_count = _count_jsonl_docs(local_raw_path)
+        min_docs = _min_raw_docs(num_sequences, seq_length)
+        if doc_count < min_docs:
+            raise RuntimeError(
+                f"Raw JSONL has {doc_count} docs but need >= {min_docs} for "
+                f"{num_sequences} sequences at seq_length={seq_length}: {local_raw_path}\n"
+                "Delete the JSONL (or run with --force-raw-recache) and resubmit so "
+                "build-jsonl-only rebuilds from parquet shards."
+            )
+        print(f"  JSONL docs={doc_count} (min={min_docs})")
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -548,9 +572,21 @@ def tokenize_dataset(
 
     if written < num_sequences:
         _write_progress(progress_path, written, row_idx + 1)
+        rows_consumed = row_idx + 1
+        hint = (
+            "Delete the JSONL and re-run build-jsonl-only with matching --seq-length, "
+            "or lower --num-sequences."
+        )
+        if local_raw_path is not None:
+            doc_count = _count_jsonl_docs(local_raw_path)
+            min_docs = _min_raw_docs(num_sequences, seq_length)
+            hint = (
+                f"Raw JSONL has {doc_count} docs (need >= {min_docs} for seq_length={seq_length}); "
+                "delete it or run with --force-raw-recache, then resubmit."
+            )
         raise RuntimeError(
-            f"Only tokenized {written}/{num_sequences} sequences. "
-            "Increase streaming time or lower --num-sequences."
+            f"Only tokenized {written}/{num_sequences} sequences "
+            f"(dataset rows consumed={rows_consumed}). {hint}"
         )
     progress_path.unlink(missing_ok=True)
     print(f"Dataset OK: {out_path} ({written} sequences, {written * row_bytes / 1e9:.2f} GB)")
@@ -595,6 +631,17 @@ def main() -> None:
             print(f"ERROR: Data bin not found: {data_path}", file=sys.stderr)
             sys.exit(1)
         validate_data_bin(data_path, seq_length=args.seq_length)
+        rows = count_bin_rows(data_path, seq_length=args.seq_length)
+        if rows < args.num_sequences:
+            print(
+                f"ERROR: Data bin has {rows} rows but need >= {args.num_sequences}: {data_path}",
+                file=sys.stderr,
+            )
+            print(
+                "Delete the .bin (and .progress if any) and re-tokenize.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         return
 
     if args.tokenize_only:

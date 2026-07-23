@@ -90,20 +90,15 @@ source "$PROJECT_ROOT/scripts/activate_env.sh"
 
 mkdir -p logs outputs cache/data cache/datasets
 
-if [[ ! -f "$RAW_DATA" ]]; then
-    echo "Building JSONL offline on compute node -> $RAW_DATA"
-    python scripts/prefetch_offline_assets.py \
-      --project-root "$PROJECT_ROOT" \
-      --skip-model \
-      --skip-raw-cache \
-      --build-jsonl-only \
-      --offline \
-      --seq-length "$SEQ_LENGTH" \
-      --num-sequences "$NUM_SEQUENCES"
-    echo "JSONL build complete."
-else
-    echo "Using cached raw JSONL: $RAW_DATA"
-fi
+echo "Ensuring raw JSONL has enough docs (seq=${TOKENIZE_SEQ} for tokenization)"
+python scripts/prefetch_offline_assets.py \
+  --project-root "$PROJECT_ROOT" \
+  --skip-model \
+  --skip-raw-cache \
+  --build-jsonl-only \
+  --offline \
+  --seq-length "$TOKENIZE_SEQ" \
+  --num-sequences "$NUM_SEQUENCES"
 
 if [[ ! -f "$DATA_BIN" ]]; then
     echo "Tokenizing offline on compute node -> $DATA_BIN (seq=${TOKENIZE_SEQ})"
@@ -118,12 +113,13 @@ if [[ ! -f "$DATA_BIN" ]]; then
       --data-bin "$DATA_BIN"
     echo "Tokenization complete."
 else
-    echo "Using cached tokenized data: $DATA_BIN"
+    echo "Validating cached tokenized data: $DATA_BIN"
     python scripts/prefetch_offline_assets.py \
       --project-root "$PROJECT_ROOT" \
       --validate-only \
       --offline \
       --seq-length "$TOKENIZE_SEQ" \
+      --num-sequences "$NUM_SEQUENCES" \
       --data-bin "$DATA_BIN"
 fi
 
