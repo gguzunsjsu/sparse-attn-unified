@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Run on the LOGIN NODE (has internet) before submitting GPU jobs.
 #
+# Downloads the model + caches raw dataset text locally. Tokenization runs
+# offline inside the SLURM training job (128 GB compute node).
+#
 # Usage:
 #   cd /scratch/rnd-guzun/sparse-attn-unified
 #   source scripts/activate_env.sh
@@ -38,16 +41,12 @@ python scripts/prefetch_offline_assets.py \
   --project-root "$PROJECT_ROOT" \
   --seq-length 4096 \
   --num-sequences 85000 \
+  --skip-data \
+  --cache-raw \
   "$@"
 
 echo ""
-if [[ -f "$PROJECT_ROOT/cache/data/train_4096.bin" ]]; then
-  echo "Done. Submit training with:"
-  echo "  cd $PROJECT_ROOT"
-  echo "  sbatch scripts/slurm/train_llama1b_h100.slurm"
-else
-  echo "Tokenization did not finish (login node may have killed the process)."
-  echo "Model is likely cached; try the SLURM data job instead:"
-  echo "  mkdir -p logs"
-  echo "  sbatch scripts/slurm/prefetch_data.slurm"
-fi
+echo "Done. Submit training (tokenizes offline on the GPU node if needed):"
+echo "  cd $PROJECT_ROOT"
+echo "  mkdir -p logs"
+echo "  sbatch scripts/slurm/train_llama1b_h100.slurm"

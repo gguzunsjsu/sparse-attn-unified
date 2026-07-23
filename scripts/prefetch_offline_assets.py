@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Download model + tokenized training data on the login node (internet required).
+"""Download model + cache raw text on the login node (internet required).
 
-GPU compute nodes on SJSU HPC have no outbound network. Run this once on the
-login node before submitting SLURM jobs.
+Tokenization runs offline on GPU compute nodes (see train_llama1b_h100.slurm).
 
 Usage (login node):
   source scripts/activate_env.sh
   hf auth login
-  python scripts/prefetch_offline_assets.py
+  bash scripts/prefetch_offline_assets.sh
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import json
 import os
 import sys
 from pathlib import Path
@@ -44,7 +44,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Delete partial model cache and download again (use after hf-xet failures)",
     )
-    p.add_argument("--skip-data", action="store_true", help="Skip dataset tokenization")
+    p.add_argument("--skip-data", action="store_true", help="Skip tokenization (default on login node)")
+    p.add_argument(
+        "--cache-raw",
+        action="store_true",
+        help="Stream dataset text to local JSONL for offline tokenization on compute nodes",
+    )
+    p.add_argument("--skip-raw-cache", action="store_true", help="Skip raw dataset caching")
+    p.add_argument(
+        "--tokenize-only",
+        action="store_true",
+        help="Only tokenize from cached raw JSONL (used by SLURM before training)",
+    )
+    p.add_argument(
+        "--offline",
+        action="store_true",
+        help="Read only from local caches (no HuggingFace Hub / dataset downloads)",
+    )
     p.add_argument(
         "--resume-data",
         action="store_true",
@@ -167,6 +183,92 @@ def download_model(model_id: str, local_dir: Path, *, force: bool = False) -> No
     print(f"Model OK: {local_dir}")
 
 
+def raw_dataset_path(project_root: Path) -> Path:
+    return project_root / "cache" / "datasets" / "fineweb_raw.jsonl"
+
+
+def _raw_progress_path(out_path: Path) -> Path:
+    return out_path.with_suffix(out_path.suffix + ".progress")
+
+
+def _read_raw_progress(progress_path: Path) -> tuple[int, int]:
+    if not progress_path.is_file():
+        return 0, 0
+    chars = 0
+    row = 0
+    for line in progress_path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("chars="):
+            chars = int(line.split("=", 1)[1])
+        elif line.startswith("row="):
+            row = int(line.split("=", 1)[1])
+    return chars, row
+
+
+def _write_raw_progress(progress_path: Path, chars: int, row: int) -> None:
+    progress_path.write_text(f"chars={chars}\nrow={row}\n", encoding="utf-8")
+
+
+def _min_raw_chars(num_sequences: int, seq_length: int) -> int:
+    # ~4 chars/token; 20% buffer for document boundaries and truncation waste.
+    return int(num_sequences * (seq_length + 1) * 4 * 1.2)
+
+
+def cache_raw_dataset(
+    out_path: Path,
+    dataset_name: str,
+    dataset_config: str,
+    num_sequences: int,
+    seq_length: int,
+    *,
+    resume: bool = False,
+) -> None:
+    from datasets import load_dataset
+
+    min_chars = _min_raw_chars(num_sequences, seq_length)
+    progress_path = _raw_progress_path(out_path)
+    start_chars, start_row = (0, 0)
+    if resume and progress_path.is_file():
+        start_chars, start_row = _read_raw_progress(progress_path)
+        if start_chars >= min_chars:
+            print(f"Raw dataset already cached: {out_path} ({start_chars} chars)")
+            return
+        if start_chars > 0:
+            print(f"Resuming raw cache from row {start_row} ({start_chars} chars)")
+
+    print(f"Caching raw text -> {out_path} (target >= {min_chars / 1e9:.2f} GB chars)")
+    ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_mode = "a" if start_chars > 0 and out_path.is_file() else "w"
+    total_chars = start_chars
+    row_idx = start_row - 1
+    with open(out_path, out_mode, encoding="utf-8") as out_f:
+        for row_idx, row in enumerate(ds):
+            if row_idx < start_row:
+                continue
+            text = row["text"]
+            if not text:
+                continue
+            out_f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+            total_chars += len(text)
+            if row_idx % 500 == 0:
+                out_f.flush()
+                os.fsync(out_f.fileno())
+                _write_raw_progress(progress_path, total_chars, row_idx + 1)
+                print(f"  row {row_idx + 1}: {total_chars / 1e9:.2f} GB chars", flush=True)
+            if total_chars >= min_chars:
+                break
+
+    if total_chars < min_chars:
+        _write_raw_progress(progress_path, total_chars, row_idx + 1)
+        raise RuntimeError(
+            f"Only cached {total_chars} chars (need {min_chars}). "
+            "Try a different dataset/config or lower --num-sequences."
+        )
+    progress_path.unlink(missing_ok=True)
+    print(f"Raw dataset OK: {out_path} ({total_chars / 1e9:.2f} GB chars)")
+
+
 def _progress_path(out_path: Path) -> Path:
     return out_path.with_suffix(out_path.suffix + ".progress")
 
@@ -196,6 +298,7 @@ def tokenize_dataset(
     seq_length: int,
     num_sequences: int,
     *,
+    local_raw_path: Path | None = None,
     resume: bool = False,
 ) -> None:
     import array
@@ -214,11 +317,23 @@ def tokenize_dataset(
             print(f"Resuming tokenization from sequence {start_written} (dataset row {start_row})")
 
     print(f"Tokenizing {num_sequences} sequences (len={seq_length}) -> {out_path}")
+    if local_raw_path is not None:
+        print(f"Reading offline raw text: {local_raw_path}")
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
+    if local_raw_path is not None:
+        if not local_raw_path.is_file():
+            raise FileNotFoundError(f"Offline raw dataset not found: {local_raw_path}")
+        ds = load_dataset(
+            "json",
+            data_files=str(local_raw_path),
+            split="train",
+            streaming=True,
+        )
+    else:
+        ds = load_dataset(dataset_name, dataset_config, split="train", streaming=True)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     row_bytes = (seq_length + 1) * np.dtype(np.int32).itemsize
@@ -280,11 +395,18 @@ def tokenize_dataset(
     print(f"Dataset OK: {out_path} ({written} sequences, {written * row_bytes / 1e9:.2f} GB)")
 
 
-def write_manifest(project_root: Path, model_dir: Path, data_path: Path, args: argparse.Namespace) -> None:
+def write_manifest(
+    project_root: Path,
+    model_dir: Path,
+    data_path: Path,
+    raw_path: Path,
+    args: argparse.Namespace,
+) -> None:
     manifest = project_root / "cache" / "offline_manifest.txt"
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
         f"model_dir={model_dir}\n"
+        f"raw_dataset={raw_path}\n"
         f"data_path={data_path}\n"
         f"seq_length={args.seq_length}\n"
         f"num_sequences={args.num_sequences}\n",
@@ -298,6 +420,39 @@ def main() -> None:
     project_root = args.project_root
     model_dir = project_root / "cache" / "models" / "Llama-3.2-1B"
     data_path = project_root / "cache" / "data" / f"train_{args.seq_length}.bin"
+    raw_path = raw_dataset_path(project_root)
+
+    offline = (
+        args.offline
+        or os.environ.get("HF_HUB_OFFLINE", "0") == "1"
+        or os.environ.get("HF_DATASETS_OFFLINE", "0") == "1"
+    )
+
+    if args.tokenize_only:
+        if not model_dir.is_dir():
+            print(f"ERROR: Model not found: {model_dir}", file=sys.stderr)
+            sys.exit(1)
+        if not raw_path.is_file():
+            print(f"ERROR: Raw dataset not found: {raw_path}", file=sys.stderr)
+            print("Run on login node: bash scripts/prefetch_offline_assets.sh", file=sys.stderr)
+            sys.exit(1)
+        progress_path = _progress_path(data_path)
+        resume_data = args.resume_data or (
+            progress_path.is_file() and _read_progress(progress_path)[0] < args.num_sequences
+        )
+        tokenize_dataset(
+            model_dir,
+            data_path,
+            args.dataset,
+            args.dataset_config,
+            args.seq_length,
+            args.num_sequences,
+            local_raw_path=raw_path,
+            resume=resume_data,
+        )
+        write_manifest(project_root, model_dir, data_path, raw_path, args)
+        print("\nTokenization complete.")
+        return
 
     if not args.skip_model:
         verify_hf_auth(args.model)
@@ -308,6 +463,20 @@ def main() -> None:
     else:
         print(f"ERROR: --skip-model but {model_dir} not found", file=sys.stderr)
         sys.exit(1)
+
+    if args.cache_raw and not args.skip_raw_cache:
+        raw_progress = _raw_progress_path(raw_path)
+        resume_raw = raw_progress.is_file() and _read_raw_progress(raw_progress)[0] < _min_raw_chars(
+            args.num_sequences, args.seq_length
+        )
+        cache_raw_dataset(
+            raw_path,
+            args.dataset,
+            args.dataset_config,
+            args.num_sequences,
+            args.seq_length,
+            resume=resume_raw or args.resume_data,
+        )
 
     progress_path = _progress_path(data_path)
     resume_data = args.resume_data or (
@@ -322,11 +491,15 @@ def main() -> None:
             args.dataset_config,
             args.seq_length,
             args.num_sequences,
+            local_raw_path=raw_path if offline and raw_path.is_file() else None,
             resume=resume_data,
         )
 
-    write_manifest(project_root, model_dir, data_path, args)
-    print("\nPrefetch complete. GPU jobs can run with HF_HUB_OFFLINE=1.")
+    write_manifest(project_root, model_dir, data_path, raw_path, args)
+    if args.skip_data:
+        print("\nPrefetch complete. Tokenization will run offline in the SLURM training job.")
+    else:
+        print("\nPrefetch complete. GPU jobs can run with HF_HUB_OFFLINE=1.")
 
 
 if __name__ == "__main__":

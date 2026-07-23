@@ -193,7 +193,8 @@ def main() -> None:
     elif offline:
         raise FileNotFoundError(
             f"Offline mode but data not found at {project_root / f'cache/data/train_{cfg.seq_length}.bin'}. "
-            "Run on login node: bash scripts/prefetch_offline_assets.sh"
+            "Submit the SLURM job (tokenizes offline) or run: "
+            "python scripts/prefetch_offline_assets.py --tokenize-only --offline --skip-model --skip-raw-cache"
         )
     else:
         tokenizer = AutoTokenizer.from_pretrained(

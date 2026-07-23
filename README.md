@@ -110,7 +110,7 @@ hf auth whoami
 
 ### 3b. Prefetch assets for offline GPU nodes (required)
 
-**GPU nodes have no internet.** Download the model and tokenized training data on the **login node** before `sbatch`:
+**GPU nodes have no internet.** On the **login node**, cache the model and raw dataset text (tokenization runs offline inside the SLURM job):
 
 ```bash
 cd /scratch/rnd-guzun/sparse-attn-unified
@@ -124,15 +124,15 @@ This creates (under your project on scratch):
 | Path | Contents |
 |------|----------|
 | `cache/models/Llama-3.2-1B/` | Full model + tokenizer (~2.5 GB) |
-| `cache/data/train_4096.bin` | 85k tokenized sequences (~1.4 GB, enough for 5k steps) |
+| `cache/datasets/fineweb_raw.jsonl` | Raw text for offline tokenization (~1.7 GB) |
 
-Prefetch takes **~30–90 min** on the login node depending on network. After it completes, SLURM jobs run fully offline (`HF_HUB_OFFLINE=1`).
+The SLURM training job tokenizes this into `cache/data/train_4096.bin` (~1.4 GB, 85k sequences) on the compute node, then trains. Re-runs skip tokenization if the `.bin` already exists.
 
-Verify:
+Verify after prefetch:
 
 ```bash
 ls -lh cache/models/Llama-3.2-1B/config.json
-ls -lh cache/data/train_4096.bin
+ls -lh cache/datasets/fineweb_raw.jsonl
 ```
 
 If you still get `command not found`, check you're in the right env:

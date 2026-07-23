@@ -15,6 +15,10 @@
 # SJSU CoE HPC — single H100 (nodes g2, g6), 256 GB RAM
 # Docs: https://www.sjsu.edu/cmpe/resources/hpc.php
 #
+# Prerequisite (login node, once):
+#   bash scripts/prefetch_offline_assets.sh
+# That caches the model + raw FineWeb text. This job tokenizes offline, then trains.
+#
 # Request H100 explicitly (optional — omit to accept any GPU):
 #   #SBATCH --constraint=h100
 #
@@ -49,6 +53,7 @@ load_cuda_module
 unset PYTHONPATH
 export PYTHONNOUSERSITE=1
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$PROJECT_ROOT/cache/huggingface/datasets}"
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
@@ -56,30 +61,48 @@ export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=8
 
-# Require offline assets (download on login node first)
+SEQ_LENGTH=4096
+NUM_SEQUENCES=85000
 MODEL_DIR="$PROJECT_ROOT/cache/models/Llama-3.2-1B"
-DATA_BIN="$PROJECT_ROOT/cache/data/train_4096.bin"
+RAW_DATA="$PROJECT_ROOT/cache/datasets/fineweb_raw.jsonl"
+DATA_BIN="$PROJECT_ROOT/cache/data/train_${SEQ_LENGTH}.bin"
+
 if [[ ! -d "$MODEL_DIR" ]]; then
     echo "ERROR: Model not prefetched: $MODEL_DIR"
     echo "Run on login node: bash scripts/prefetch_offline_assets.sh"
     exit 1
 fi
-if [[ ! -f "$DATA_BIN" ]]; then
-    echo "ERROR: Training data not prefetched: $DATA_BIN"
+if [[ ! -f "$RAW_DATA" ]]; then
+    echo "ERROR: Raw dataset not cached: $RAW_DATA"
     echo "Run on login node: bash scripts/prefetch_offline_assets.sh"
     exit 1
 fi
-echo "Offline assets OK: model + data"
+echo "Offline assets OK: model + raw text"
 
 # Activate env via shared helpers (handles empty $HOME on compute nodes)
 # shellcheck source=/dev/null
 source "$PROJECT_ROOT/scripts/activate_env.sh"
 
-mkdir -p logs outputs
+mkdir -p logs outputs cache/data
+
+if [[ ! -f "$DATA_BIN" ]]; then
+    echo "Tokenizing offline on compute node -> $DATA_BIN"
+    python scripts/prefetch_offline_assets.py \
+      --project-root "$PROJECT_ROOT" \
+      --skip-model \
+      --skip-raw-cache \
+      --tokenize-only \
+      --offline \
+      --seq-length "$SEQ_LENGTH" \
+      --num-sequences "$NUM_SEQUENCES"
+    echo "Tokenization complete."
+else
+    echo "Using cached tokenized data: $DATA_BIN"
+fi
 
 python scripts/train_llama1b_ssa.py \
   --sparse-backend socket \
-  --seq-length 4096 \
+  --seq-length "$SEQ_LENGTH" \
   --batch-size 1 \
   --grad-accum 16 \
   --max-steps 5000 \
