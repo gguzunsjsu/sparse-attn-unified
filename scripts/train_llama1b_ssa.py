@@ -312,7 +312,7 @@ def main() -> None:
     if not math.isfinite(baseline_lm) or baseline_lm < 0.5 or baseline_lm > 25.0:
         raise RuntimeError(
             f"Suspicious baseline LM loss ({baseline_lm:.4f}). "
-            "Run: pip install -e .  then resubmit (stale sparse_attn install)."
+            "Run on login node: bash scripts/install_project_deps.sh  then resubmit."
         )
     model.train()
     train_probe = model(first_ids, first_labels, training=True, global_step=0)

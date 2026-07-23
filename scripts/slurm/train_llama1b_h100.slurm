@@ -127,9 +127,14 @@ else
       --data-bin "$DATA_BIN"
 fi
 
-python -m pip install -e "$PROJECT_ROOT" --no-deps -q
-echo "sparse_attn import path:"
-python -c "import sparse_attn.models.llama_ssa as m; print(m.__file__)"
+# GPU nodes have no internet — do not pip install here (build isolation hits PyPI).
+# PYTHONPATH=$PROJECT_ROOT (set above) imports the repo directly.
+if ! python -c "import sparse_attn.models.llama_ssa as m; print('sparse_attn:', m.__file__)"; then
+    echo "ERROR: sparse_attn not importable from $PROJECT_ROOT"
+    echo "On the login node (has internet), run once:"
+    echo "  source scripts/activate_env.sh && bash scripts/install_project_deps.sh"
+    exit 1
+fi
 
 python scripts/train_llama1b_ssa.py \
   --sparse-backend socket \
