@@ -6,7 +6,7 @@ login node before submitting SLURM jobs.
 
 Usage (login node):
   source scripts/activate_env.sh
-  huggingface-cli login
+  hf auth login
   python scripts/prefetch_offline_assets.py
 """
 
@@ -94,15 +94,10 @@ Llama 3.2 1B requires HuggingFace authentication.
 
 3. Login on the login node (pick ONE):
 
-   huggingface-cli login
-
-   OR
-
-   export HF_TOKEN=hf_xxxxxxxx
-   export HF_HOME=$HOME/.cache/huggingface
+  hf auth login
 
 4. Verify:
-   huggingface-cli whoami
+   hf auth whoami
    bash scripts/prefetch_offline_assets.sh
 """
 

@@ -66,7 +66,7 @@ bash scripts/setup_hpc_legacy.sh
 | `CUDA out of memory` during training | SSA runs FA + SA each layer | Use batch=1; ensure latest code (fixed sparse_attention memory bug) |
 | `ERROR: torch not installed in env 'ssa-h100'` | Env created but PyTorch install failed/skipped | `bash scripts/install_torch.sh` |
 | `ModuleNotFoundError: No module named 'torch'` | Env not activated on GPU node (fresh `srun` shell) | `source scripts/activate_env.sh` then retry, OR use `bash scripts/run_smoke_test.sh` |
-| `401 Unauthorized` / `GatedRepoError` on prefetch | Not logged in or license not accepted | Accept license at huggingface.co/meta-llama/Llama-3.2-1B, then `huggingface-cli login` |
+| `401 Unauthorized` / `GatedRepoError` on prefetch | Not logged in or license not accepted | Accept license at huggingface.co/meta-llama/Llama-3.2-1B, then `hf auth login` |
 | `Network is unreachable` / HuggingFace download on GPU node | GPU nodes have no internet | Run `bash scripts/prefetch_offline_assets.sh` on **login node** first |
 | `module(s) are unknown: "cuda"` | SJSU uses versioned modules (`cuda/12.1`), not bare `cuda` | Run `module avail cuda`; then `CUDA_MODULE=cuda/X.Y sbatch ...` |
 | `torch.cuda.is_available()` is False on GPU node | CUDA module not loaded | `bash scripts/load_cuda.sh` or set `CUDA_MODULE=cuda/12.1` |
@@ -85,12 +85,11 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 
 ### 3. HuggingFace access
 
-Llama 3.2 1B is gated. **Activate your env first** — `huggingface-cli` is not available on the system Python.
+Llama 3.2 1B is gated. **Activate your env first**, then use the `hf` CLI (`pip install huggingface_hub` provides it).
 
 ```bash
 micromamba activate ssa-h100   # or: conda activate ssa-h100
 
-# Install CLI if missing
 python -m pip install huggingface_hub
 
 # 1. Accept Meta Llama license in browser (required once per HF account):
@@ -99,14 +98,14 @@ python -m pip install huggingface_hub
 # 2. Create a READ token: https://huggingface.co/settings/tokens
 
 # 3. Login on login node (pick ONE):
-huggingface-cli login
+hf auth login
 # OR paste token non-interactively:
 # export HF_TOKEN=hf_xxxxxxxx
 
 export HF_HOME=$HOME/.cache/huggingface
 
 # 4. Verify before prefetch:
-huggingface-cli whoami
+hf auth whoami
 ```
 
 ### 3b. Prefetch assets for offline GPU nodes (required)
@@ -116,7 +115,7 @@ huggingface-cli whoami
 ```bash
 cd /scratch/rnd-guzun/sparse-attn-unified
 source scripts/activate_env.sh
-huggingface-cli login                    # once, for gated Llama 3.2 1B
+hf auth login                    # once, for gated Llama 3.2 1B
 bash scripts/prefetch_offline_assets.sh
 ```
 
@@ -139,8 +138,8 @@ ls -lh cache/data/train_4096.bin
 If you still get `command not found`, check you're in the right env:
 
 ```bash
-which python    # should be ~/micromamba/envs/ssa-h100/bin/python
-which huggingface-cli
+which hf    # should be in your conda env
+hf auth whoami
 ```
 
 ### 4. Smoke test (interactive H100)
