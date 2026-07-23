@@ -20,6 +20,8 @@ source "$PROJECT_ROOT/scripts/hf_helpers.sh"
 
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-$PROJECT_ROOT/cache/huggingface/datasets}"
+# Avoid hf-xet "Unable to parse string as hex hash value" on large Llama weights.
+export HF_HUB_DISABLE_XET=1
 
 # Auth check before multi-GB download
 if [[ -z "${HF_TOKEN:-}" && -z "${HUGGING_FACE_HUB_TOKEN:-}" ]]; then

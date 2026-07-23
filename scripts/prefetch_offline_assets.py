@@ -17,6 +17,10 @@ import os
 import sys
 from pathlib import Path
 
+# hf-xet can fail on large model blobs ("Unable to parse string as hex hash value").
+# Must be set before any huggingface_hub import (prefetch_offline_assets.sh exports this too).
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 import numpy as np
 
 
@@ -34,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dataset", default="HuggingFaceFW/fineweb-edu")
     p.add_argument("--dataset-config", default="sample-10BT")
     p.add_argument("--skip-model", action="store_true", help="Skip model download (already cached)")
+    p.add_argument(
+        "--force-model-redownload",
+        action="store_true",
+        help="Delete partial model cache and download again (use after hf-xet failures)",
+    )
     p.add_argument("--skip-data", action="store_true", help="Skip dataset tokenization")
     return p.parse_args()
 
@@ -112,17 +121,34 @@ Your HF account is logged in but does NOT have access to {model_id}.
 """
 
 
-def download_model(model_id: str, local_dir: Path) -> None:
+def download_model(model_id: str, local_dir: Path, *, force: bool = False) -> None:
     from huggingface_hub import snapshot_download
 
+    if force and local_dir.exists():
+        import shutil
+
+        print(f"Removing incomplete model cache: {local_dir}")
+        shutil.rmtree(local_dir)
+
     print(f"Downloading model {model_id} -> {local_dir}")
+    print("(Using plain HTTP; HF_HUB_DISABLE_XET=1 avoids hf-xet hash errors on large weights.)")
     local_dir.mkdir(parents=True, exist_ok=True)
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    snapshot_download(
-        repo_id=model_id,
-        local_dir=str(local_dir),
-        token=token,
-    )
+    try:
+        snapshot_download(
+            repo_id=model_id,
+            local_dir=str(local_dir),
+            token=token,
+            max_workers=4,
+        )
+    except RuntimeError as exc:
+        if "hex hash" in str(exc).lower():
+            raise RuntimeError(
+                f"{exc}\n\n"
+                "Partial download may be corrupted. Re-run with:\n"
+                f"  python scripts/prefetch_offline_assets.py --force-model-redownload"
+            ) from exc
+        raise
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -203,7 +229,7 @@ def main() -> None:
 
     if not args.skip_model:
         verify_hf_auth(args.model)
-        download_model(args.model, model_dir)
+        download_model(args.model, model_dir, force=args.force_model_redownload)
     elif model_dir.is_dir():
         print(f"Skipping model download; using {model_dir}")
     else:
