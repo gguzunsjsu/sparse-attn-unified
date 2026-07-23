@@ -106,7 +106,8 @@ class LocalMemmapDataset(IterableDataset):
                 if self.stored_seq > self.seq_length:
                     row = row[: self.seq_length + 1]
                 input_ids = torch.from_numpy(np.asarray(row[:-1], dtype=np.int64))
-                yield {"input_ids": input_ids, "labels": input_ids.clone()}
+                labels = torch.from_numpy(np.asarray(row[1:], dtype=np.int64))
+                yield {"input_ids": input_ids, "labels": labels}
 
 
 class StreamingTextDataset(IterableDataset):
@@ -217,6 +218,7 @@ def main() -> None:
         for step in range(5):
             ids = torch.randint(100, 5000, (cfg.per_device_batch_size, cfg.seq_length), device=device)
             labels = ids.clone()
+            labels[:, :-1] = ids[:, 1:]
             out = model(ids, labels, training=True, global_step=step)
             out["loss"].backward()
             optimizer.step()
@@ -257,6 +259,24 @@ def main() -> None:
         num_workers=0,
     )
 
+    # Sanity-check one batch before training (printed to .out, not tqdm).
+    first_batch = next(iter(loader))
+    first_ids = first_batch["input_ids"].to(device)
+    first_labels = first_batch["labels"].to(device)
+    print(
+        f"Data check: shape={tuple(first_ids.shape)} "
+        f"token_range=[{int(first_ids.min())}, {int(first_ids.max())}]",
+        flush=True,
+    )
+    model.eval()
+    with torch.no_grad():
+        probe = model(first_ids, first_labels, training=False, inference_mode="full")
+    print(
+        f"Baseline LM loss (full attn, no grad): {probe['lm_loss'].float().item():.4f}",
+        flush=True,
+    )
+    model.train()
+
     out_dir = Path(cfg.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -279,6 +299,12 @@ def main() -> None:
             input_ids = batch["input_ids"].to(device)
             labels = batch["labels"].to(device)
             out = model(input_ids, labels, training=True, global_step=step)
+            if accum + 1 >= cfg.gradient_accumulation_steps:
+                step_stats = {
+                    "loss": out["loss"].detach().float().item(),
+                    "lm": out["lm_loss"].detach().float().item(),
+                    "align": out["align_loss"].detach().float().item(),
+                }
             (out["loss"] / cfg.gradient_accumulation_steps).backward()
             accum += 1
 
@@ -290,17 +316,12 @@ def main() -> None:
                 pbar.update(1)
 
                 if step % cfg.logging_steps == 0:
-                    stats = {
-                        "loss": out["loss"].item(),
-                        "lm": out["lm_loss"].item(),
-                        "align": out["align_loss"].item(),
-                    }
                     pbar.set_postfix(
-                        loss=f"{stats['loss']:.4f}",
-                        lm=f"{stats['lm']:.4f}",
-                        align=f"{stats['align']:.4f}",
+                        loss=f"{step_stats['loss']:.4f}",
+                        lm=f"{step_stats['lm']:.4f}",
+                        align=f"{step_stats['align']:.4f}",
                     )
-                    _log_step(step, stats)
+                    _log_step(step, step_stats)
 
                 if step % cfg.save_steps == 0:
                     ckpt = out_dir / f"checkpoint-{step}"

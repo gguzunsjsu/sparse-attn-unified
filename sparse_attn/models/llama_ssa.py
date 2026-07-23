@@ -197,11 +197,9 @@ class LlamaSSAModel(nn.Module):
 
         out: dict[str, torch.Tensor] = {"logits": logits}
         if labels is not None:
-            shift_logits = logits[..., :-1, :].float().contiguous()
-            shift_labels = labels[..., 1:].contiguous()
             lm_loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
+                logits.float().reshape(-1, logits.size(-1)),
+                labels.reshape(-1),
                 ignore_index=-100,
             )
             align_loss = self.align_tracker.total(self.ssa_cfg.align_weight)

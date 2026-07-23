@@ -76,6 +76,7 @@ def test_llama_ssa_smoke_forward():
     model.train()
     ids = torch.randint(0, 1000, (1, 64))
     labels = ids.clone()
+    labels[:, :-1] = ids[:, 1:]
     out = model(ids, labels, training=True)
     assert "loss" in out
     assert math.isfinite(out["loss"].item())
