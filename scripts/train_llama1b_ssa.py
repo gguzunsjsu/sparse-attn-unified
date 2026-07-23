@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from pathlib import Path
 
@@ -264,6 +265,15 @@ def main() -> None:
     accum = 0
     pbar = tqdm(total=cfg.max_steps, desc="train")
 
+    def _log_step(step_num: int, stats: dict[str, float]) -> None:
+        msg = (
+            f"step {step_num}: loss={stats['loss']:.4f} "
+            f"lm={stats['lm']:.4f} align={stats['align']:.4f}"
+        )
+        print(msg, flush=True)
+        if not math.isfinite(stats["loss"]):
+            raise RuntimeError(f"Non-finite loss at step {step_num}: {msg}")
+
     while step < cfg.max_steps:
         for batch in loader:
             input_ids = batch["input_ids"].to(device)
@@ -280,11 +290,17 @@ def main() -> None:
                 pbar.update(1)
 
                 if step % cfg.logging_steps == 0:
+                    stats = {
+                        "loss": out["loss"].item(),
+                        "lm": out["lm_loss"].item(),
+                        "align": out["align_loss"].item(),
+                    }
                     pbar.set_postfix(
-                        loss=f"{out['loss'].item():.3f}",
-                        lm=f"{out['lm_loss'].item():.3f}",
-                        align=f"{out['align_loss'].item():.3f}",
+                        loss=f"{stats['loss']:.4f}",
+                        lm=f"{stats['lm']:.4f}",
+                        align=f"{stats['align']:.4f}",
                     )
+                    _log_step(step, stats)
 
                 if step % cfg.save_steps == 0:
                     ckpt = out_dir / f"checkpoint-{step}"
