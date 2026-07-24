@@ -52,14 +52,15 @@ def main() -> None:
     v = torch.randn(b, h, t, d, device=device, dtype=dtype)
     tokens = b * t
 
-    print(f"device={device} dtype={dtype} shape=[{b},{h},{t},{d}]")
+    print(f"device={device} dtype={dtype} shape=[{b},{h},{t},{d}]", flush=True)
 
     if args.compare_dense:
         fa = FullAttentionBackend()
         ms = _bench(lambda: fa.forward(q, k, v), args.warmup, args.iters, device)
-        print(f"dense_fa          {ms:8.2f} ms   {tokens / (ms / 1000):,.0f} tok/s")
+        print(f"dense_fa          {ms:8.2f} ms   {tokens / (ms / 1000):,.0f} tok/s", flush=True)
 
     if args.backend in ("socket", "both"):
+        print("socket (bucket retrieval)...", flush=True)
         scfg = SocketConfig(train_l=8, top_m_buckets=8, use_bucket_retrieval=True)
         sb = SocketBackend(d, scfg, training=False).to(device=device, dtype=dtype)
         mask_holder: list = []
@@ -85,9 +86,10 @@ def main() -> None:
         scfg_dense = SocketConfig(train_l=8, use_bucket_retrieval=False)
         sb_d = SocketBackend(d, scfg_dense, training=False).to(device=device, dtype=dtype)
         ms_dense_build = _bench(lambda: sb_d.build_mask(q, k, v), args.warmup, args.iters, device)
-        print(f"socket_dense_mask {ms_dense_build:8.2f} ms  (legacy QxT scores)")
+        print(f"socket_dense_mask {ms_dense_build:8.2f} ms  (legacy QxT scores)", flush=True)
 
     if args.backend in ("saap", "both"):
+        print("saap (cluster retrieval)...", flush=True)
         acfg = SaapConfig(num_clusters=64, top_m_clusters=2, use_cluster_retrieval=True)
         ab = SaapBackend(d, acfg).to(device=device, dtype=dtype)
         ab.train()
