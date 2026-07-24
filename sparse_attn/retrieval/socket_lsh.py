@@ -69,6 +69,8 @@ def socket_collision_scores_for_keys(
     codes: torch.Tensor,
     soft_q: torch.Tensor,
     key_indices: torch.LongTensor,
+    *,
+    key_chunk: int = 512,
 ) -> torch.Tensor:
     """
     Soft-collision scores for candidate keys only.
@@ -80,21 +82,24 @@ def socket_collision_scores_for_keys(
     """
     b, h, q_len, k_sel = key_indices.shape
     l_tables = codes.size(-1)
-
-    b_idx = torch.arange(b, device=codes.device)[:, None, None, None]
-    h_idx = torch.arange(h, device=codes.device)[None, :, None, None]
-    key_codes = codes[b_idx, h_idx, key_indices.clamp(min=0), :]
-
     scores = torch.zeros(b, h, q_len, k_sel, device=soft_q.device, dtype=soft_q.dtype)
-    for table_idx in range(l_tables):
-        bucket = key_codes[..., table_idx]
-        table_scores = torch.gather(
-            soft_q[:, :, :, table_idx, :],
-            dim=-1,
-            index=bucket,
-        )
-        scores = scores + table_scores
-    return scores / l_tables
+    idx_safe = key_indices.clamp(min=0)
+
+    for k0 in range(0, k_sel, key_chunk):
+        k1 = min(k0 + key_chunk, k_sel)
+        idx_chunk = idx_safe[..., k0:k1]
+        chunk_scores = torch.zeros(b, h, q_len, k1 - k0, device=soft_q.device, dtype=soft_q.dtype)
+        for table_idx in range(l_tables):
+            table_codes = codes[:, :, :, table_idx].unsqueeze(2).expand(b, h, q_len, -1)
+            bucket = torch.gather(table_codes, 3, idx_chunk)
+            table_scores = torch.gather(
+                soft_q[:, :, :, table_idx, :],
+                dim=-1,
+                index=bucket,
+            )
+            chunk_scores = chunk_scores + table_scores
+        scores[..., k0:k1] = chunk_scores / l_tables
+    return scores
 
 
 def _top_keys_from_bucket_match(
@@ -142,13 +147,17 @@ def socket_select_topk_mask(
     _, _, q_len, _, num_buckets = soft_q.shape
     device = codes.device
     top_m = min(top_m_buckets, num_buckets)
-    per_bucket_cap = max_candidates or max(budget, 64)
+    n_always = int(always_idx.numel())
+    max_total = max_candidates or (budget + n_always + 32)
+    slots = l_tables * top_m + 1
+    per_bucket_cap = min(24, max(4, (max_total - n_always) // max(slots, 1)))
 
     always = always_idx.view(1, 1, 1, -1).expand(b, h, q_len, -1)
     all_indices: list[torch.Tensor] = []
     all_scores: list[torch.Tensor] = []
     total_valid = 0.0
     total_slots = 0.0
+    last_cand_width = 0.0
 
     for q_start in range(0, q_len, query_chunk):
         q_end = min(q_start + query_chunk, q_len)
@@ -172,6 +181,9 @@ def socket_select_topk_mask(
                 )
 
         cand_lists = torch.cat(parts, dim=-1)
+        if cand_lists.size(-1) > max_total:
+            cand_lists = cand_lists[..., :max_total]
+        last_cand_width = float(cand_lists.size(-1))
         valid = cand_lists >= 0
         safe_idx = cand_lists.clamp(min=0)
         cand_scores = socket_collision_scores_for_keys(codes, soft_chunk, safe_idx)
@@ -195,6 +207,6 @@ def socket_select_topk_mask(
         "mean_selected_keys": float(indices.size(-1)),
         "mean_valid_candidates": total_valid / max(total_slots, 1) * indices.size(-1),
         "top_m_buckets": float(top_m),
-        "candidate_width": float(cand_lists.size(-1)) if all_indices else 0.0,
+        "candidate_width": last_cand_width,
     }
     return indices, scores, stats

@@ -63,14 +63,17 @@ def saap_candidate_mask_and_scores(
     """Build SAAP indices via cluster union + routing scores on candidates."""
     b, h, q_len, num_clusters = query_weights.shape
     device = query_weights.device
-    per_cluster_cap = max_candidates or max(budget, 64)
     m = min(top_m_clusters, num_clusters)
+    n_always = int(always_idx.numel())
+    max_total = max_candidates or (budget + n_always + 32)
+    per_cluster_cap = min(24, max(4, (max_total - n_always) // max(m + 1, 1)))
 
     always = always_idx.view(1, 1, 1, -1).expand(b, h, q_len, -1)
     all_indices: list[torch.Tensor] = []
     all_scores: list[torch.Tensor] = []
     total_valid = 0.0
     total_slots = 0.0
+    last_cand_width = 0.0
 
     for q_start in range(0, q_len, query_chunk):
         q_end = min(q_start + query_chunk, q_len)
@@ -92,6 +95,9 @@ def saap_candidate_mask_and_scores(
             )
 
         cand = torch.cat(parts, dim=-1)
+        if cand.size(-1) > max_total:
+            cand = cand[..., :max_total]
+        last_cand_width = float(cand.size(-1))
         valid = cand >= 0
         safe = cand.clamp(min=0)
         scores = saap_scores_for_keys(qw, key_clusters, safe)
@@ -114,6 +120,6 @@ def saap_candidate_mask_and_scores(
         "mean_selected_keys": float(indices.size(-1)),
         "mean_valid_candidates": total_valid / max(total_slots, 1) * indices.size(-1),
         "top_m_clusters": float(m),
-        "candidate_width": float(cand.size(-1)) if all_indices else 0.0,
+        "candidate_width": last_cand_width,
     }
     return indices, scores, stats
