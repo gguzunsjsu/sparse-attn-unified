@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 
 
 def _top_keys_from_cluster_match(
@@ -41,12 +40,17 @@ def saap_scores_for_keys(
     key_clusters: [B,H,T]
     key_indices: [B,H,Q,K]
     """
-    b, h, q_len, k_sel = key_indices.shape
-    b_idx = torch.arange(b, device=key_indices.device)[:, None, None, None]
-    h_idx = torch.arange(h, device=key_indices.device)[None, :, None, None]
-    clusters = key_clusters[b_idx, h_idx, key_indices.clamp(min=0)]
-    onehot = F.one_hot(clusters, query_weights.size(-1)).float()
-    return torch.einsum("bhqc,bhqkc->bhqk", query_weights, onehot)
+    b, h, _q_len, k_sel = key_indices.shape
+    idx_safe = key_indices.clamp(min=0)
+    scores = torch.empty(b, h, query_weights.size(2), k_sel, device=query_weights.device, dtype=query_weights.dtype)
+    for k0 in range(0, k_sel, 512):
+        k1 = min(k0 + 512, k_sel)
+        idx_chunk = idx_safe[..., k0:k1]
+        b_idx = torch.arange(b, device=key_indices.device)[:, None, None, None]
+        h_idx = torch.arange(h, device=key_indices.device)[None, :, None, None]
+        clusters = key_clusters[b_idx, h_idx, idx_chunk]
+        scores[..., k0:k1] = torch.gather(query_weights, -1, clusters)
+    return scores
 
 
 def saap_candidate_mask_and_scores(
