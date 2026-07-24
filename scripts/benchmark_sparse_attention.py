@@ -48,6 +48,52 @@ def _peak_mem_gb(device: str) -> float | None:
     return torch.cuda.max_memory_allocated() / 1e9
 
 
+def _is_sparse_backend_param(key: str) -> bool:
+    if ".ssa_attn.sa." not in key:
+        return False
+    return any(part in key for part in ("masker.", "router.", "centroids."))
+
+
+def load_ssa_checkpoint(
+    model: LlamaSSAModel,
+    state: dict[str, torch.Tensor],
+    *,
+    sparse_backend: str,
+    checkpoint_path: Path,
+) -> None:
+    """Load checkpoint; allow SOCKET↔SAAP by keeping mismatched sparse-backend weights at init."""
+    model_state = model.state_dict()
+    compatible: dict[str, torch.Tensor] = {}
+    for key, tensor in state.items():
+        if key not in model_state:
+            continue
+        if model_state[key].shape != tensor.shape:
+            continue
+        compatible[key] = tensor
+
+    model.load_state_dict(compatible, strict=False)
+
+    missing = [k for k in model_state if k not in compatible]
+    skipped_ckpt = [k for k in state if k not in compatible]
+    missing_core = [k for k in missing if not _is_sparse_backend_param(k)]
+    if missing_core:
+        raise RuntimeError(
+            "Checkpoint missing non-sparse weights (first few): "
+            + ", ".join(missing_core[:8])
+        )
+
+    missing_sparse = [k for k in missing if _is_sparse_backend_param(k)]
+    if missing_sparse or skipped_ckpt:
+        _log(
+            f"Loaded checkpoint: {checkpoint_path} "
+            f"({len(compatible)} tensors, backend={sparse_backend}; "
+            f"{len(missing_sparse)} sparse params from init, "
+            f"{len(skipped_ckpt)} ckpt keys skipped)"
+        )
+    else:
+        _log(f"Loaded checkpoint: {checkpoint_path} ({len(compatible)} tensors)")
+
+
 def load_model(
     *,
     model_dir: Path,
@@ -76,8 +122,12 @@ def load_model(
 
     if checkpoint is not None:
         state = torch.load(checkpoint, map_location=device, weights_only=True)
-        model.load_state_dict(state, strict=True)
-        _log(f"Loaded checkpoint: {checkpoint}")
+        load_ssa_checkpoint(
+            model,
+            state,
+            sparse_backend=sparse_backend,
+            checkpoint_path=checkpoint,
+        )
     else:
         _log("Using base Llama weights (no SSA fine-tune checkpoint)")
 

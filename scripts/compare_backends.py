@@ -352,7 +352,7 @@ def main() -> None:
 
     _log("")
     _log("Notes:")
-    _log("- Same checkpoint weights for all paths; SOCKET-trained checkpoints still run SAAP routers/codes from init.")
+    _log("- SOCKET-trained checkpoints load shared weights into SAAP; router/centroids stay at init.")
     _log("- Throughput uses PyTorch SOCKET/SAAP retrieval in this repo, not amarka8/SOCKET CUDA kernels.")
     _log("- Layer microbench: python scripts/benchmark_attention.py --seq-length 2048 --backend both --compare-dense")
 
