@@ -257,8 +257,38 @@ scripts/
 ├── prefetch_offline_assets.py
 ├── run_smoke_test.sh     # GPU smoke test wrapper
 ├── train_llama1b_ssa.py
+├── benchmark_sparse_attention.py  # GPU: full vs sparse throughput + LM loss
 └── slurm/train_llama1b_h100.slurm
 ```
+
+## Throughput benchmark (full vs sparse)
+
+On a **GPU node** (interactive or `srun`), compare dense FA inference, SOCKET sparse inference, and dual-stream training step time:
+
+```bash
+cd /scratch/rnd-guzun/sparse-attn-unified
+source scripts/activate_env.sh
+export PYTHONPATH=$PWD
+
+python scripts/benchmark_sparse_attention.py \
+  --checkpoint outputs/llama1b-ssa-socket-59688/model_final.pt \
+  --data-bin cache/data/train_2048.bin \
+  --seq-length 2048 4096 \
+  --batch-size 1 \
+  --socket-train-l 8 \
+  --checkpoint-fa
+```
+
+Modes (default: all four):
+
+| Mode | What it measures |
+|------|------------------|
+| `infer_full` | Eval forward, dense FA only (`inference_mode=full`) |
+| `infer_sparse` | Eval forward, SOCKET sparse path only |
+| `train_forward` | Dual-stream SSA forward (FA + SA + align), no backward |
+| `train_step` | One training micro-step (forward + backward); ~matches SLURM step time |
+
+Output includes **ms/iter**, **tokens/s**, **LM loss** on the same batch, and **peak VRAM**. Expect training modes to be much slower than single-path inference; sparse may or may not beat dense with the **PyTorch** SOCKET masker at seq 2048.
 
 ## Inference
 
