@@ -57,10 +57,15 @@ def load_model(
     sparse_backend: str,
     checkpoint_fa: bool,
     socket_train_l: int,
+    match_saap_sparsity_to_socket: bool = False,
 ) -> LlamaSSAModel:
     cfg = HPCConfig(seq_length=2048, per_device_batch_size=1)
     cfg.ssa = SSAConfig(sparse_backend=sparse_backend, checkpoint_fa=checkpoint_fa)
     cfg.socket.train_l = socket_train_l
+    if match_saap_sparsity_to_socket and sparse_backend == "saap":
+        cfg.saap.sink_size = cfg.socket.sink_size
+        cfg.saap.window_size = cfg.socket.window_size
+        cfg.saap.heavy_const = cfg.socket.heavy_const
 
     model = LlamaSSAModel.from_pretrained_base(
         str(model_dir),
@@ -85,6 +90,7 @@ def _sample_batch(
     seq_length: int,
     batch_size: int,
     device: str,
+    batch_offset: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if data_bin is not None and data_bin.is_file():
         import numpy as np
@@ -101,15 +107,16 @@ def _sample_batch(
         chunks: list[torch.Tensor] = []
         for b in range(batch_size):
             need = seq_length + 1
+            row_idx = (b + batch_offset) % rows.shape[0]
             if seq_length <= stored_seq:
-                row = np.asarray(rows[b % rows.shape[0], : need], dtype=np.int64)
+                row = np.asarray(rows[row_idx, : need], dtype=np.int64)
             else:
                 # Concatenate across rows when the .bin was tokenized at shorter seq_length.
                 flat_ids: list[int] = []
-                row_idx = b
+                walk = row_idx
                 while len(flat_ids) < need:
-                    flat_ids.extend(int(x) for x in rows[row_idx % rows.shape[0]].tolist())
-                    row_idx += 1
+                    flat_ids.extend(int(x) for x in rows[walk % rows.shape[0]].tolist())
+                    walk += 1
                 row = np.asarray(flat_ids[:need], dtype=np.int64)
             chunks.append(torch.from_numpy(row.copy()))
         batch = torch.stack(chunks, dim=0).long().to(device)

@@ -258,19 +258,34 @@ scripts/
 ├── run_smoke_test.sh     # GPU smoke test wrapper
 ├── train_llama1b_ssa.py
 ├── benchmark_sparse_attention.py  # GPU: full vs sparse throughput + LM loss
+├── compare_backends.py            # Dense vs SOCKET vs SAAP (loss + throughput table)
 ├── benchmark_attention.py         # Single-layer retrieval vs kernel vs dense
 └── slurm/train_llama1b_h100.slurm
 ```
 
 ## Throughput benchmark (full vs sparse)
 
-On a **GPU node** (interactive or `srun`), compare dense FA inference, SOCKET sparse inference, and dual-stream training step time:
+On a **GPU node** (interactive or `srun`), compare **dense FA vs SOCKET vs SAAP** on the same checkpoint and data (recommended):
 
 ```bash
 cd /scratch/rnd-guzun/sparse-attn-unified
 source scripts/activate_env.sh
 export PYTHONPATH=$PWD
 
+python scripts/compare_backends.py \
+  --checkpoint outputs/llama1b-ssa-socket-59688/model_final.pt \
+  --data-bin cache/data/train_2048.bin \
+  --seq-length 2048 \
+  --batch-size 1 \
+  --loss-batches 8 \
+  --match-sparsity
+```
+
+Output is a table of **ms/iter**, **tok/s**, **LM loss**, and **Δ vs dense** for each path. Use `--include-train` to add dual-stream **train_step** timings per sparse backend. Without `--match-sparsity`, SAAP uses its default smaller key budget (~80 vs ~269 keys at seq 2048).
+
+Single-backend sweep (original script):
+
+```bash
 python scripts/benchmark_sparse_attention.py \
   --checkpoint outputs/llama1b-ssa-socket-59688/model_final.pt \
   --data-bin cache/data/train_2048.bin \
