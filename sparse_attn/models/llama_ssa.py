@@ -152,15 +152,19 @@ class LlamaSSAModel(nn.Module):
                 nn.init.normal_(module.weight, std=0.02)
 
     def _update_rope(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> None:
-        if self._cos.numel() >= seq_len:
+        cached = int(self._cos.size(2)) if self._cos.numel() else 0
+        if cached >= seq_len:
             return
-        cos, sin = build_rope_cache(
-            seq_len,
-            self.cfg.hidden_size // self.cfg.num_attention_heads,
-            device,
-            dtype,
-            self.cfg.rope_theta,
-        )
+        # Constants — must not be inference tensors or grad checkpointing fails after eval().
+        with torch.inference_mode(False):
+            with torch.no_grad():
+                cos, sin = build_rope_cache(
+                    seq_len,
+                    self.cfg.hidden_size // self.cfg.num_attention_heads,
+                    device,
+                    dtype,
+                    self.cfg.rope_theta,
+                )
         self._cos = cos
         self._sin = sin
 

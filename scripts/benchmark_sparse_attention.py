@@ -245,6 +245,9 @@ def main() -> None:
     for seq_len in args.seq_length:
         _log("")
         _log(f"=== seq_length={seq_len} batch_size={args.batch_size} ===")
+        # Force RoPE rebuild when seq length changes (avoids stale shorter cache).
+        model._cos = torch.empty(0, device=device)
+        model._sin = torch.empty(0, device=device)
         input_ids, labels = _sample_batch(
             data_bin if data_bin.is_file() else None,
             seq_length=seq_len,
