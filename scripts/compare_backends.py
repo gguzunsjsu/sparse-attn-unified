@@ -17,9 +17,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 _BENCH_PATH = Path(__file__).resolve().parent / "benchmark_sparse_attention.py"
-_spec = importlib.util.spec_from_file_location("_bench_sparse", _BENCH_PATH)
+_spec = importlib.util.spec_from_file_location("benchmark_sparse_attention", _BENCH_PATH)
 _bench = importlib.util.module_from_spec(_spec)
-assert _spec.loader is not None
+assert _spec.loader is not None and _spec.name is not None
+sys.modules[_spec.name] = _bench
 _spec.loader.exec_module(_bench)
 
 _log = _bench._log
