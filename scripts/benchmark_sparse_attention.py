@@ -97,9 +97,20 @@ def _sample_batch(
                 row_width = w
                 break
         rows = flat.reshape(-1, row_width)
-        chunks = []
-        for i in range(batch_size):
-            row = rows[i % rows.shape[0], : seq_length + 1]
+        stored_seq = row_width - 1
+        chunks: list[torch.Tensor] = []
+        for b in range(batch_size):
+            need = seq_length + 1
+            if seq_length <= stored_seq:
+                row = np.asarray(rows[b % rows.shape[0], : need], dtype=np.int64)
+            else:
+                # Concatenate across rows when the .bin was tokenized at shorter seq_length.
+                flat_ids: list[int] = []
+                row_idx = b
+                while len(flat_ids) < need:
+                    flat_ids.extend(int(x) for x in rows[row_idx % rows.shape[0]].tolist())
+                    row_idx += 1
+                row = np.asarray(flat_ids[:need], dtype=np.int64)
             chunks.append(torch.from_numpy(row.copy()))
         batch = torch.stack(chunks, dim=0).long().to(device)
         return batch[:, :-1], batch[:, 1:]
@@ -254,7 +265,13 @@ def main() -> None:
             batch_size=args.batch_size,
             device=device,
         )
-        tokens = seq_len * args.batch_size
+        actual_seq = int(input_ids.shape[1])
+        if actual_seq != seq_len:
+            _log(
+                f"WARN: requested seq_length={seq_len} but input has {actual_seq} tokens "
+                f"(data bin row width may be shorter; concatenated rows if possible)."
+            )
+        tokens = actual_seq * args.batch_size
 
         for mode in args.modes:
             spec = mode_specs[mode]
@@ -280,7 +297,7 @@ def main() -> None:
             results.append(
                 BenchResult(
                     name=mode,
-                    seq_length=seq_len,
+                    seq_length=actual_seq,
                     batch_size=args.batch_size,
                     ms_per_iter=ms,
                     tokens_per_sec=tps,
@@ -293,7 +310,7 @@ def main() -> None:
             _log(f"{mode:16s}  {ms:8.2f} ms/iter  {tps:8.1f} tok/s{lm_str}{mem_str}")
 
         # Speedups vs dense inference on this seq length
-        by_name = {r.name: r for r in results if r.seq_length == seq_len}
+        by_name = {r.name: r for r in results if r.seq_length == actual_seq}
         if "infer_full" in by_name and "infer_sparse" in by_name:
             full_ms = by_name["infer_full"].ms_per_iter
             sparse_ms = by_name["infer_sparse"].ms_per_iter
