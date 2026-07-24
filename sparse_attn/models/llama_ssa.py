@@ -13,6 +13,7 @@ from sparse_attn.backends.utils import apply_rope, build_rope_cache
 from sparse_attn.config import HPCConfig, Llama1BConfig, SSAConfig, SaapConfig, SocketConfig
 from sparse_attn.layers.ssa_attention import SSADualStreamAttention
 from sparse_attn.ssa.alignment import SSAAlignmentTracker
+from sparse_attn.ssa.schedule import align_weight
 
 
 class RMSNorm(nn.Module):
@@ -76,6 +77,7 @@ class LlamaSSABlock(nn.Module):
         training: bool = True,
         inference_mode: str = "sparse",
         global_step: int = 0,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         residual = hidden
         x = self.input_layernorm(hidden)
@@ -99,6 +101,7 @@ class LlamaSSABlock(nn.Module):
             training=training,
             inference_mode=inference_mode,
             global_step=global_step,
+            layer_idx=layer_idx,
         )
         attn_out = attn_out.transpose(1, 2).contiguous().view(hidden.size(0), hidden.size(1), -1)
         hidden = residual + self.o_proj(attn_out)
@@ -185,7 +188,7 @@ class LlamaSSAModel(nn.Module):
         hidden = self.embed_tokens(input_ids)
         self.align_tracker.reset()
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             hidden = layer(
                 hidden,
                 self._cos[:, :, :seq_len, :],
@@ -193,6 +196,7 @@ class LlamaSSAModel(nn.Module):
                 training=training,
                 inference_mode=inference_mode,
                 global_step=global_step,
+                layer_idx=i,
             )
             self.align_tracker.add(layer.ssa_attn.alignment_loss)
 
@@ -206,7 +210,7 @@ class LlamaSSAModel(nn.Module):
                 labels.reshape(-1),
                 ignore_index=-100,
             )
-            align_loss = self.align_tracker.total(self.ssa_cfg.align_weight)
+            align_loss = self.align_tracker.total(align_weight(self.ssa_cfg, global_step))
             if align_loss.device != lm_loss.device:
                 align_loss = align_loss.to(lm_loss.device)
             out["loss"] = lm_loss + align_loss

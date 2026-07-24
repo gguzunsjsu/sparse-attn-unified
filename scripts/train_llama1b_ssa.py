@@ -54,6 +54,17 @@ def parse_args() -> argparse.Namespace:
         help="Gradient-checkpoint the FA stream (saves VRAM, slower)",
     )
     p.add_argument("--socket-train-l", type=int, default=None, help="SOCKET LSH tables during training")
+    p.add_argument(
+        "--ssa-schedule",
+        action="store_true",
+        help="Enable phased SSA schedule (FA warmup, align ramp, optional sparse-only phase)",
+    )
+    p.add_argument(
+        "--sparse-only-after-step",
+        type=int,
+        default=None,
+        help="When --ssa-schedule: run SA-only after this global step",
+    )
     return p.parse_args()
 
 
@@ -195,6 +206,11 @@ def main() -> None:
         cfg.ssa.checkpoint_fa = args.checkpoint_fa
     if args.socket_train_l is not None:
         cfg.socket.train_l = args.socket_train_l
+    if args.ssa_schedule:
+        cfg.ssa.schedule_enabled = True
+    if args.sparse_only_after_step is not None:
+        cfg.ssa.schedule_enabled = True
+        cfg.ssa.sparse_only_after_step = args.sparse_only_after_step
     if args.output_dir:
         cfg.output_dir = args.output_dir
 

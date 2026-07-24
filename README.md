@@ -258,6 +258,7 @@ scripts/
 ├── run_smoke_test.sh     # GPU smoke test wrapper
 ├── train_llama1b_ssa.py
 ├── benchmark_sparse_attention.py  # GPU: full vs sparse throughput + LM loss
+├── benchmark_attention.py         # Single-layer retrieval vs kernel vs dense
 └── slurm/train_llama1b_h100.slurm
 ```
 
@@ -289,6 +290,14 @@ Modes (default: all four):
 | `train_step` | One training micro-step (forward + backward); ~matches SLURM step time |
 
 Output includes **ms/iter**, **tokens/s**, **LM loss** on the same batch, and **peak VRAM**. Expect training modes to be much slower than single-path inference; sparse may or may not beat dense with the **PyTorch** SOCKET masker at seq 2048.
+
+**Attention-only breakdown** (retrieval vs kernel vs dense FA on one layer):
+
+```bash
+python scripts/benchmark_attention.py --seq-length 2048 --backend both --compare-dense
+```
+
+SOCKET/SAAP now use **bucket/cluster retrieval** by default (`use_bucket_retrieval` / `use_cluster_retrieval`). Disable for legacy dense `[Q,T]` score mats. Optional SSA **training schedule**: set `ssa.schedule_enabled: true` in config.
 
 ## Inference
 

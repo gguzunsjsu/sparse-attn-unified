@@ -12,6 +12,12 @@ from sparse_attn.backends.saap.attention import SaapBackend
 from sparse_attn.backends.socket.attention import SocketBackend
 from sparse_attn.config import SSAConfig, SaapConfig, SocketConfig
 from sparse_attn.ssa.alignment import alignment_distance
+from sparse_attn.ssa.schedule import (
+    checkpoint_fa as schedule_checkpoint_fa,
+    p_sparse as schedule_p_sparse,
+    run_fa_stream,
+    run_sa_stream,
+)
 
 
 def build_sparse_backend(
@@ -66,6 +72,7 @@ class SSADualStreamAttention(nn.Module):
         training: bool = True,
         inference_mode: str = "sparse",
         global_step: int = 0,
+        layer_idx: int = 0,
     ) -> torch.Tensor:
         if not training:
             if inference_mode == "full":
@@ -76,6 +83,10 @@ class SSADualStreamAttention(nn.Module):
         if isinstance(self.sa, SaapBackend):
             self.sa.maybe_refresh_centroids(k, global_step)
 
+        use_fa = run_fa_stream(self.cfg, global_step, layer_idx)
+        use_sa = run_sa_stream(self.cfg, global_step)
+        use_ckpt = schedule_checkpoint_fa(self.cfg, global_step, layer_idx)
+
         def fa_fn(q_, k_, v_):
             return self.fa.forward(q_, k_, v_)
 
@@ -83,20 +94,30 @@ class SSADualStreamAttention(nn.Module):
             mask = self.sa.build_mask(q_, k_, v_, causal=True)
             return self.sa.forward(q_, k_, v_, mask)
 
-        if self.cfg.checkpoint_fa:
-            o_fa = checkpoint(fa_fn, q, k, v, use_reentrant=False)
-            o_sa = checkpoint(sa_fn, q, k, v, use_reentrant=False)
-        else:
-            o_fa = fa_fn(q, k, v)
-            o_sa = sa_fn(q, k, v)
+        o_fa: torch.Tensor | None = None
+        o_sa: torch.Tensor | None = None
 
-        self._last_align_loss = alignment_distance(
-            o_fa,
-            o_sa,
-            metric=self.cfg.align_metric,
-            stopgrad_sa=self.cfg.align_stopgrad_sa,
-        )
+        if use_fa and use_sa:
+            if use_ckpt:
+                o_fa = checkpoint(fa_fn, q, k, v, use_reentrant=False)
+                o_sa = checkpoint(sa_fn, q, k, v, use_reentrant=False)
+            else:
+                o_fa = fa_fn(q, k, v)
+                o_sa = sa_fn(q, k, v)
+            self._last_align_loss = alignment_distance(
+                o_fa,
+                o_sa,
+                metric=self.cfg.align_metric,
+                stopgrad_sa=self.cfg.align_stopgrad_sa,
+            )
+            route_p = schedule_p_sparse(self.cfg, global_step)
+            if torch.rand((), device=q.device) < route_p:
+                return o_sa
+            return o_fa
 
-        if torch.rand((), device=q.device) < self.cfg.p_sparse:
-            return o_sa
-        return o_fa
+        if use_sa:
+            self._last_align_loss = torch.tensor(0.0, device=q.device)
+            return sa_fn(q, k, v)
+
+        self._last_align_loss = torch.tensor(0.0, device=q.device)
+        return fa_fn(q, k, v)

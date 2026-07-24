@@ -16,6 +16,12 @@ class SSAConfig:
     sparse_backend: Literal["socket", "saap"] = "socket"
     align_stopgrad_sa: bool = True
     checkpoint_fa: bool = True
+    # Optional training schedule (see sparse_attn.ssa.schedule)
+    schedule_enabled: bool = False
+    fa_warmup_steps: int = 200
+    align_ramp_steps: int = 500
+    sparse_only_after_step: int | None = None
+    fa_every_n_layers: int = 1
 
 
 @dataclass
@@ -29,6 +35,9 @@ class SocketConfig:
     heavy_const: float = 0.10
     sink_size: int = 32
     window_size: int = 32
+    top_m_buckets: int = 8
+    use_bucket_retrieval: bool = True
+    retrieval_query_chunk: int = 128
 
 
 @dataclass
@@ -41,6 +50,11 @@ class SaapConfig:
     router_hidden: int = 512
     gumbel_tau: float = 1.0
     use_soft_routing: bool = True
+    use_cluster_retrieval: bool = True
+    retrieval_query_chunk: int = 128
+    sink_size: int = 16
+    window_size: int = 16
+    heavy_const: float = 0.15
 
 
 @dataclass

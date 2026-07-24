@@ -43,7 +43,7 @@ def test_socket_forward_shape(attn_tensors):
 def test_saap_router_grad(attn_tensors):
     q, k, v = attn_tensors
     q = q.detach().requires_grad_(True)
-    backend = SaapBackend(16, SaapConfig(num_clusters=8, top_m_clusters=2))
+    backend = SaapBackend(16, SaapConfig(num_clusters=8, top_m_clusters=2, use_cluster_retrieval=False))
     mask = backend.build_mask(q, k, v)
     out = backend.forward(q, k, v, mask)
     loss = out.sum()
@@ -61,7 +61,7 @@ def test_ssa_dual_stream_alignment(attn_tensors):
         training=True,
     )
     layer.train()
-    out = layer(q, k, v, training=True)
+    out = layer(q, k, v, training=True, layer_idx=0)
     assert out.shape == q.shape
     assert layer.alignment_loss.item() >= 0
 
@@ -72,6 +72,7 @@ def test_llama_ssa_smoke_forward():
     cfg.ssa.checkpoint_fa = False
     cfg.socket.train_l = 4
     cfg.socket.bucket_k = 4
+    cfg.socket.use_bucket_retrieval = False
     model = LlamaSSAModel(cfg, training=True)
     model.train()
     ids = torch.randint(0, 1000, (1, 64))

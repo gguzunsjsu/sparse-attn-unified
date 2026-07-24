@@ -6,8 +6,13 @@ import torch
 import torch.nn.functional as F
 
 from sparse_attn.backends.base import SparseAttentionBackend, SparseMask
-from sparse_attn.backends.utils import always_keep_indices, sparse_attention
+from sparse_attn.backends.utils import always_keep_indices
 from sparse_attn.config import SocketConfig
+from sparse_attn.kernels.py_gather import sparse_attention
+from sparse_attn.retrieval.socket_lsh import (
+    socket_collision_scores_dense,
+    socket_select_topk_mask,
+)
 
 
 class SocketMasker(torch.nn.Module):
@@ -39,60 +44,17 @@ class SocketMasker(torch.nn.Module):
         return (bits * powers).sum(-1)
 
     def _query_soft_scores(self, q: torch.Tensor) -> torch.Tensor:
-        # Projections [B, H, Q, L, P] -> bucket logits [B, H, Q, L, R]
         proj = torch.einsum("bhqd,lde->bhqle", q, self.hash_proj)
         logits = torch.einsum("bhqle,re->bhqlr", proj, self.bucket_signs) / self.cfg.tau
         return F.softmax(logits, dim=-1)
 
-    def score_keys(self, q: torch.Tensor, k: torch.Tensor, *, query_chunk: int = 256) -> torch.Tensor:
-        """Soft collision scores [B, H, Q, T]. Chunked over Q to limit peak VRAM."""
-        codes = self._key_bucket_codes(k)
-        soft_q = self._query_soft_scores(q)
-        b, h, t, l_tables = codes.shape
-        _, _, q_len, _, _ = soft_q.shape
+    def key_codes_and_query_soft(self, q: torch.Tensor, k: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self._key_bucket_codes(k), self._query_soft_scores(q)
 
-        if q_len * t <= 512 * 512:
-            return self._score_keys_block(codes, soft_q, b, h, q_len, t, l_tables, q.device, q.dtype)
-
-        chunks = []
-        for q_start in range(0, q_len, query_chunk):
-            q_end = min(q_start + query_chunk, q_len)
-            block = self._score_keys_block(
-                codes,
-                soft_q[:, :, q_start:q_end, :, :],
-                b,
-                h,
-                q_end - q_start,
-                t,
-                l_tables,
-                q.device,
-                q.dtype,
-            )
-            chunks.append(block)
-        return torch.cat(chunks, dim=2)
-
-    def _score_keys_block(
-        self,
-        codes: torch.Tensor,
-        soft_q: torch.Tensor,
-        b: int,
-        h: int,
-        q_len: int,
-        t: int,
-        l_tables: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        scores = torch.zeros(b, h, q_len, t, device=device, dtype=dtype)
-        for table_idx in range(l_tables):
-            bucket = codes[..., table_idx]
-            table_scores = torch.gather(
-                soft_q[:, :, :, table_idx, :],
-                dim=-1,
-                index=bucket.unsqueeze(2).expand(b, h, q_len, t),
-            )
-            scores = scores + table_scores
-        return scores / l_tables
+    def score_keys_dense(self, q: torch.Tensor, k: torch.Tensor, *, query_chunk: int = 256) -> torch.Tensor:
+        """Legacy dense [B,H,Q,T] scores (parity / use_bucket_retrieval=False)."""
+        codes, soft_q = self.key_codes_and_query_soft(q, k)
+        return socket_collision_scores_dense(codes, soft_q, query_chunk=query_chunk)
 
 
 class SocketBackend(SparseAttentionBackend, torch.nn.Module):
@@ -102,6 +64,7 @@ class SocketBackend(SparseAttentionBackend, torch.nn.Module):
         super().__init__()
         self.cfg = cfg
         self.masker = SocketMasker(head_dim, cfg, training=training)
+        self.last_retrieval_stats: dict[str, float] = {}
 
     @property
     def name(self) -> str:
@@ -124,20 +87,35 @@ class SocketBackend(SparseAttentionBackend, torch.nn.Module):
         b, h, q_len, _ = q.shape
         t = k.size(2)
         device = q.device
+        budget = self._budget(t)
+        always = always_keep_indices(t, self.cfg.sink_size, self.cfg.window_size, device)
 
-        scores = self.masker.score_keys(q, k)
+        codes, soft_q = self.masker.key_codes_and_query_soft(q, k)
+
+        if self.cfg.use_bucket_retrieval:
+            indices, scores, stats = socket_select_topk_mask(
+                codes,
+                soft_q,
+                budget=budget,
+                top_m_buckets=self.cfg.top_m_buckets,
+                always_idx=always,
+                causal=causal,
+                query_chunk=self.cfg.retrieval_query_chunk,
+            )
+            self.last_retrieval_stats = stats
+            return SparseMask(indices=indices, scores=scores)
+
+        scores = self.masker.score_keys_dense(q, k)
         if causal:
             pos_q = torch.arange(q_len, device=device).view(1, 1, q_len, 1)
             pos_k = torch.arange(t, device=device).view(1, 1, 1, t)
             scores = scores.masked_fill(pos_k > pos_q, float("-inf"))
 
-        budget = self._budget(t)
         topk_scores, topk_idx = torch.topk(scores, k=min(budget, t), dim=-1)
-
-        always = always_keep_indices(t, self.cfg.sink_size, self.cfg.window_size, device)
         always_idx = always.view(1, 1, 1, -1).expand(b, h, q_len, -1)
         combined = torch.cat([always_idx, topk_idx], dim=-1)
         combined = combined[..., : min(budget, combined.size(-1))]
+        self.last_retrieval_stats = {"mean_selected_keys": float(combined.size(-1)), "dense_scores": 1.0}
         return SparseMask(indices=combined, scores=topk_scores)
 
     def forward(
